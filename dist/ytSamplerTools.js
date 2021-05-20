@@ -54,7 +54,7 @@ module.exports = class Cache extends Map {
   }
 };
 
-},{"timers":68}],2:[function(require,module,exports){
+},{"timers":70}],2:[function(require,module,exports){
 const utils = require('./utils');
 const FORMATS = require('./formats');
 
@@ -1022,7 +1022,7 @@ ytdl.downloadFromInfo = (info, options) => {
 };
 
 }).call(this)}).call(this,require("timers").setImmediate)
-},{"./format-utils":2,"./info":6,"./sig":7,"./url-utils":8,"./utils":9,"m3u8stream":11,"miniget":15,"stream":32,"timers":68}],5:[function(require,module,exports){
+},{"./format-utils":2,"./info":6,"./sig":7,"./url-utils":8,"./utils":9,"m3u8stream":12,"miniget":18,"stream":34,"timers":70}],5:[function(require,module,exports){
 const utils = require('./utils');
 const { URL } = require('./url-utils');
 const qs = require('querystring');
@@ -1362,7 +1362,7 @@ exports.getStoryboards = info => {
   });
 };
 
-},{"./url-utils":8,"./utils":9,"m3u8stream":11,"querystring":30}],6:[function(require,module,exports){
+},{"./url-utils":8,"./utils":9,"m3u8stream":12,"querystring":31}],6:[function(require,module,exports){
 const querystring = require('querystring');
 const sax = require('sax');
 const miniget = require('miniget');
@@ -1845,7 +1845,7 @@ exports.validateURL = urlUtils.validateURL;
 exports.getURLVideoID = urlUtils.getURLVideoID;
 exports.getVideoID = urlUtils.getVideoID;
 
-},{"./cache":1,"./format-utils":2,"./info-extras":5,"./sig":7,"./url-utils":8,"./utils":9,"miniget":15,"querystring":30,"sax":16,"timers":68}],7:[function(require,module,exports){
+},{"./cache":1,"./format-utils":2,"./info-extras":5,"./sig":7,"./url-utils":8,"./utils":9,"miniget":18,"querystring":31,"sax":33,"timers":70}],7:[function(require,module,exports){
 const { URL } = require('./url-utils');
 const miniget = require('miniget');
 const querystring = require('querystring');
@@ -2094,7 +2094,7 @@ exports.decipherFormats = async(formats, html5player, options) => {
   return decipheredFormats;
 };
 
-},{"./cache":1,"./url-utils":8,"miniget":15,"querystring":30}],8:[function(require,module,exports){
+},{"./cache":1,"./url-utils":8,"miniget":18,"querystring":31}],8:[function(require,module,exports){
 /**
  * URL constructor
  *
@@ -2197,7 +2197,7 @@ exports.validateURL = string => {
   }
 };
 
-},{"url":69}],9:[function(require,module,exports){
+},{"url":71}],9:[function(require,module,exports){
 (function (process){(function (){
 const miniget = require('miniget');
 
@@ -2371,7 +2371,68 @@ exports.checkForUpdates = () => {
 };
 
 }).call(this)}).call(this,require('_process'))
-},{"../package.json":17,"_process":26,"miniget":15}],10:[function(require,module,exports){
+},{"../package.json":10,"_process":27,"miniget":18}],10:[function(require,module,exports){
+module.exports={
+  "name": "ytdl-core",
+  "description": "YouTube video downloader in pure javascript.",
+  "keywords": [
+    "youtube",
+    "video",
+    "download"
+  ],
+  "version": "0.0.0-development",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/fent/node-ytdl-core.git"
+  },
+  "author": "fent <fentbox@gmail.com> (https://github.com/fent)",
+  "contributors": [
+    "Tobias Kutscha (https://github.com/TimeForANinja)",
+    "Andrew Kelley (https://github.com/andrewrk)",
+    "Mauricio Allende (https://github.com/mallendeo)",
+    "Rodrigo Altamirano (https://github.com/raltamirano)",
+    "Jim Buck (https://github.com/JimmyBoh)"
+  ],
+  "main": "./lib/index.js",
+  "types": "./typings/index.d.ts",
+  "files": [
+    "lib",
+    "typings"
+  ],
+  "scripts": {
+    "test": "nyc --reporter=lcov --reporter=text-summary npm run test:unit",
+    "test:unit": "mocha --ignore test/irl-test.js test/*-test.js --timeout 4000",
+    "test:irl": "mocha --timeout 16000 test/irl-test.js",
+    "lint": "eslint ./",
+    "lint:fix": "eslint --fix ./",
+    "lint:typings": "tslint typings/index.d.ts",
+    "lint:typings:fix": "tslint --fix typings/index.d.ts"
+  },
+  "dependencies": {
+    "m3u8stream": "file:./submodules/node-m3u8stream/",
+    "miniget": "file:./submodules/node-miniget/",
+    "sax": "^1.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^13.1.0",
+    "assert-diff": "^3.0.1",
+    "dtslint": "^3.6.14",
+    "eslint": "^6.8.0",
+    "mocha": "^7.0.0",
+    "muk-require": "^1.2.0",
+    "nock": "^13.0.4",
+    "nyc": "^15.0.0",
+    "sinon": "^9.0.0",
+    "stream-equal": "~1.1.0",
+    "typescript": "^3.9.7"
+  },
+  "engines": {
+    "node": ">=10"
+  },
+  "license": "MIT"
+}
+
+},{}],11:[function(require,module,exports){
 "use strict";
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -2405,9 +2466,9 @@ class DashMPDParser extends stream_1.Writable {
                 Number: seq,
                 Time: currtime,
             };
-            return str.replace(/\$(\w+)\$/g, (m, p1) => context[p1] + '');
+            return str.replace(/\$(\w+)\$/g, (m, p1) => `${context[p1]}`);
         };
-        this._parser.on('opentag', (node) => {
+        this._parser.on('opentag', node => {
             switch (node.name) {
                 case 'mpd':
                     currtime =
@@ -2450,10 +2511,10 @@ class DashMPDParser extends stream_1.Writable {
                 case 'adaptationset':
                 case 'representation':
                     treeLevel++;
-                    if (targetID == null) {
+                    if (!targetID) {
                         targetID = node.attributes.id;
                     }
-                    getSegments = node.attributes.id === targetID + '';
+                    getSegments = node.attributes.id === `${targetID}`;
                     if (getSegments) {
                         if (periodStart) {
                             currtime += periodStart;
@@ -2478,7 +2539,7 @@ class DashMPDParser extends stream_1.Writable {
                     if (getSegments) {
                         gotSegments = true;
                         let tl = timeline.shift();
-                        let segmentDuration = (tl && tl.duration || duration) / timescale * 1000;
+                        let segmentDuration = ((tl === null || tl === void 0 ? void 0 : tl.duration) || duration) / timescale * 1000;
                         this.emit('item', {
                             url: baseURL.filter(s => !!s).join('') + node.attributes.media,
                             seq: seq++,
@@ -2500,7 +2561,7 @@ class DashMPDParser extends stream_1.Writable {
                 this.emit('end');
             }
         };
-        this._parser.on('closetag', (tagName) => {
+        this._parser.on('closetag', tagName => {
             switch (tagName) {
                 case 'adaptationset':
                 case 'representation':
@@ -2516,8 +2577,8 @@ class DashMPDParser extends stream_1.Writable {
                                 duration: 0,
                             });
                         }
-                        for (let { duration, repeat, time } of timeline) {
-                            duration = duration / timescale * 1000;
+                        for (let { duration: itemDuration, repeat, time } of timeline) {
+                            itemDuration = itemDuration / timescale * 1000;
                             repeat = repeat || 1;
                             currtime = time || currtime;
                             for (let i = 0; i < repeat; i++) {
@@ -2525,9 +2586,9 @@ class DashMPDParser extends stream_1.Writable {
                                     url: baseURL.filter(s => !!s).join('') +
                                         tmpl(segmentTemplate.media),
                                     seq: seq++,
-                                    duration,
+                                    duration: itemDuration,
                                 });
-                                currtime += duration;
+                                currtime += itemDuration;
                             }
                         }
                     }
@@ -2540,7 +2601,7 @@ class DashMPDParser extends stream_1.Writable {
                     break;
             }
         });
-        this._parser.on('text', (text) => {
+        this._parser.on('text', text => {
             if (lastTag === 'baseurl') {
                 baseURL[treeLevel] = text;
                 lastTag = null;
@@ -2555,26 +2616,33 @@ class DashMPDParser extends stream_1.Writable {
 }
 exports.default = DashMPDParser;
 
-},{"./parse-time":13,"sax":16,"stream":32}],11:[function(require,module,exports){
+},{"./parse-time":14,"sax":17,"stream":34}],12:[function(require,module,exports){
 "use strict";
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 const stream_1 = require("stream");
-const url_1 = require("url");
 const miniget_1 = __importDefault(require("miniget"));
 const m3u8_parser_1 = __importDefault(require("./m3u8-parser"));
 const dash_mpd_parser_1 = __importDefault(require("./dash-mpd-parser"));
-const queue_1 = __importDefault(require("./queue"));
+const queue_1 = require("./queue");
 const parse_time_1 = require("./parse-time");
+/**
+ * URL constructor
+ *
+ * For compatibility with browser and Node.js APIs
+ * Checks the global window for a URL library, else defaults to the node.js module
+ */
+const URL = typeof window !== 'undefined' ? window.URL : require('url').URL;
 const supportedParsers = {
-    'm3u8': m3u8_parser_1.default,
+    m3u8: m3u8_parser_1.default,
     'dash-mpd': dash_mpd_parser_1.default,
 };
 let m3u8stream = ((playlistURL, options = {}) => {
     const stream = new stream_1.PassThrough();
     const chunkReadahead = options.chunkReadahead || 3;
-    const liveBuffer = options.liveBuffer || 20000; // 20 seconds
+    // 20 seconds.
+    const liveBuffer = options.liveBuffer || 20000;
     const requestOptions = options.requestOptions;
     const Parser = supportedParsers[options.parser || (/\.mpd$/.test(playlistURL) ? 'dash-mpd' : 'm3u8')];
     if (!Parser) {
@@ -2592,28 +2660,29 @@ let m3u8stream = ((playlistURL, options = {}) => {
         }
     };
     let currSegment;
-    const streamQueue = new queue_1.default((req, callback) => {
+    const streamQueue = new queue_1.Queue((req, callback) => {
         currSegment = req;
         // Count the size manually, since the `content-length` header is not
         // always there.
         let size = 0;
         req.on('data', (chunk) => size += chunk.length);
         req.pipe(stream, { end: false });
-        req.on('end', () => callback(undefined, size));
+        req.on('end', () => callback(null, size));
     }, { concurrency: 1 });
     let segmentNumber = 0;
     let downloaded = 0;
-    const requestQueue = new queue_1.default((segment, callback) => {
-        let options = Object.assign({}, requestOptions);
+    const requestQueue = new queue_1.Queue((segment, callback) => {
+        let reqOptions = Object.assign({}, requestOptions);
         if (segment.range) {
-            options.headers = Object.assign({}, options.headers, {
+            reqOptions.headers = Object.assign({}, reqOptions.headers, {
                 Range: `bytes=${segment.range.start}-${segment.range.end}`,
             });
         }
-        let req = miniget_1.default(url_1.resolve(playlistURL, segment.url), options);
+        let targetUrl = new URL(segment.url, playlistURL).href;
+        let req = miniget_1.default(targetUrl, reqOptions);
         req.on('error', callback);
         forwardEvents(req);
-        streamQueue.push(req, (err, size) => {
+        streamQueue.push(req, (_, size) => {
             downloaded += +size;
             stream.emit('progress', {
                 num: ++segmentNumber,
@@ -2621,7 +2690,7 @@ let m3u8stream = ((playlistURL, options = {}) => {
                 duration: segment.duration,
                 url: segment.url,
             }, requestQueue.total, downloaded);
-            callback();
+            callback(null);
         });
     }, { concurrency: chunkReadahead });
     const onError = (err) => {
@@ -2700,7 +2769,8 @@ let m3u8stream = ((playlistURL, options = {}) => {
                 // Only keep the last `liveBuffer` of items.
                 while (tailedItems.length > 1 &&
                     tailedItemsDuration - tailedItems[0].duration > liveBuffer) {
-                    tailedItemsDuration -= tailedItems.shift().duration;
+                    const lastItem = tailedItems.shift();
+                    tailedItemsDuration -= lastItem.duration;
                 }
             }
             starttime += timedItem.duration;
@@ -2710,16 +2780,16 @@ let m3u8stream = ((playlistURL, options = {}) => {
             // If we are too ahead of the stream, make sure to get the
             // latest available items with a small buffer.
             if (!addedItems.length && tailedItems.length) {
-                tailedItems.forEach((item) => { addItem(item); });
+                tailedItems.forEach(item => { addItem(item); });
             }
             // Refresh the playlist when remaining segments get low.
             refreshThreshold = Math.max(1, Math.ceil(addedItems.length * 0.01));
             // Throttle refreshing the playlist by looking at the duration
             // of live items added on this refresh.
             minRefreshTime =
-                addedItems.reduce(((total, item) => item.duration + total), 0);
+                addedItems.reduce((total, item) => item.duration + total, 0);
             fetchingPlaylist = false;
-            onQueuedEnd();
+            onQueuedEnd(null);
         });
     };
     refreshPlaylist();
@@ -2737,7 +2807,7 @@ let m3u8stream = ((playlistURL, options = {}) => {
 m3u8stream.parseTimestamp = parse_time_1.humanStr;
 module.exports = m3u8stream;
 
-},{"./dash-mpd-parser":10,"./m3u8-parser":12,"./parse-time":13,"./queue":14,"miniget":15,"stream":32,"url":69}],12:[function(require,module,exports){
+},{"./dash-mpd-parser":11,"./m3u8-parser":13,"./parse-time":14,"./queue":15,"miniget":16,"stream":34,"url":71}],13:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const stream_1 = require("stream");
@@ -2761,7 +2831,7 @@ class m3u8Parser extends stream_1.Writable {
         let attrs = {};
         let regex = /([A-Z0-9-]+)=(?:"([^"]*?)"|([^,]*?))/g;
         let match;
-        while ((match = regex.exec(value)) != null) {
+        while ((match = regex.exec(value)) !== null) {
             attrs[match[1]] = match[2] || match[3];
         }
         return attrs;
@@ -2849,15 +2919,10 @@ class m3u8Parser extends stream_1.Writable {
 }
 exports.default = m3u8Parser;
 
-},{"stream":32}],13:[function(require,module,exports){
+},{"stream":34}],14:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.durationStr = exports.humanStr = void 0;
-/**
- * Converts human friendly time to milliseconds. Supports the format
- * 00:00:00.000 for hours, minutes, seconds, and milliseconds respectively.
- * And 0ms, 0s, 0m, 0h, and together 1m1s.
- */
 const numberFormat = /^\d+$/;
 const timeFormat = /^(?:(?:(\d+):)?(\d{1,2}):)?(\d{1,2})(?:\.(\d{3}))?$/;
 const timeUnits = {
@@ -2866,6 +2931,14 @@ const timeUnits = {
     m: 60000,
     h: 3600000,
 };
+/**
+ * Converts human friendly time to milliseconds. Supports the format
+ * 00:00:00.000 for hours, minutes, seconds, and milliseconds respectively.
+ * And 0ms, 0s, 0m, 0h, and together 1m1s.
+ *
+ * @param {number|string} time
+ * @returns {number}
+ */
 exports.humanStr = (time) => {
     if (typeof time === 'number') {
         return time;
@@ -2875,16 +2948,16 @@ exports.humanStr = (time) => {
     }
     const firstFormat = timeFormat.exec(time);
     if (firstFormat) {
-        return +(firstFormat[1] || 0) * timeUnits.h +
-            +(firstFormat[2] || 0) * timeUnits.m +
-            +firstFormat[3] * timeUnits.s +
+        return (+(firstFormat[1] || 0) * timeUnits.h) +
+            (+(firstFormat[2] || 0) * timeUnits.m) +
+            (+firstFormat[3] * timeUnits.s) +
             +(firstFormat[4] || 0);
     }
     else {
         let total = 0;
         const r = /(-?\d+)(ms|s|m|h)/g;
         let rs;
-        while ((rs = r.exec(time)) != null) {
+        while ((rs = r.exec(time)) !== null) {
             total += +rs[1] * timeUnits[rs[2]];
         }
         return total;
@@ -2892,23 +2965,31 @@ exports.humanStr = (time) => {
 };
 /**
  * Parses a duration string in the form of "123.456S", returns milliseconds.
+ *
+ * @param {string} time
+ * @returns {number}
  */
 exports.durationStr = (time) => {
     let total = 0;
     const r = /(\d+(?:\.\d+)?)(S|M|H)/g;
     let rs;
-    while ((rs = r.exec(time)) != null) {
+    while ((rs = r.exec(time)) !== null) {
         total += +rs[1] * timeUnits[rs[2].toLowerCase()];
     }
     return total;
 };
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.Queue = void 0;
 class Queue {
     /**
      * A really simple queue with concurrency.
+     *
+     * @param {Function} worker
+     * @param {Object} options
+     * @param {!number} options.concurrency
      */
     constructor(worker, options = {}) {
         this._worker = worker;
@@ -2919,6 +3000,9 @@ class Queue {
     }
     /**
      * Push a task to the queue.
+     *
+     *  @param {T} item
+     *  @param {!Function} callback
      */
     push(item, callback) {
         this.tasks.push({ item, callback });
@@ -2941,9 +3025,7 @@ class Queue {
             }
             this.active--;
             callbackCalled = true;
-            if (callback) {
-                callback(err, result);
-            }
+            callback === null || callback === void 0 ? void 0 : callback(err, result);
             this._next();
         });
     }
@@ -2954,9 +3036,9 @@ class Queue {
         this.tasks = [];
     }
 }
-exports.default = Queue;
+exports.Queue = Queue;
 
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 (function (process){(function (){
 "use strict";
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
@@ -3230,7 +3312,7 @@ function Miniget(url, options = {}) {
 module.exports = Miniget;
 
 }).call(this)}).call(this,require('_process'))
-},{"_process":26,"http":47,"https":23,"stream":32,"url":69}],16:[function(require,module,exports){
+},{"_process":27,"http":49,"https":24,"stream":34,"url":71}],17:[function(require,module,exports){
 (function (Buffer){(function (){
 ;(function (sax) { // wrapper for non-node envs
   sax.parser = function (strict, opt) { return new SAXParser(strict, opt) }
@@ -4799,68 +4881,301 @@ module.exports = Miniget;
 })(typeof exports === 'undefined' ? this.sax = {} : exports)
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":20,"stream":32,"string_decoder":67}],17:[function(require,module,exports){
-module.exports={
-  "name": "ytdl-core",
-  "description": "YouTube video downloader in pure javascript.",
-  "keywords": [
-    "youtube",
-    "video",
-    "download"
-  ],
-  "version": "0.0.0-development",
-  "repository": {
-    "type": "git",
-    "url": "git://github.com/fent/node-ytdl-core.git"
-  },
-  "author": "fent <fentbox@gmail.com> (https://github.com/fent)",
-  "contributors": [
-    "Tobias Kutscha (https://github.com/TimeForANinja)",
-    "Andrew Kelley (https://github.com/andrewrk)",
-    "Mauricio Allende (https://github.com/mallendeo)",
-    "Rodrigo Altamirano (https://github.com/raltamirano)",
-    "Jim Buck (https://github.com/JimmyBoh)"
-  ],
-  "main": "./lib/index.js",
-  "types": "./typings/index.d.ts",
-  "files": [
-    "lib",
-    "typings"
-  ],
-  "scripts": {
-    "test": "nyc --reporter=lcov --reporter=text-summary npm run test:unit",
-    "test:unit": "mocha --ignore test/irl-test.js test/*-test.js --timeout 4000",
-    "test:irl": "mocha --timeout 16000 test/irl-test.js",
-    "lint": "eslint ./",
-    "lint:fix": "eslint --fix ./",
-    "lint:typings": "tslint typings/index.d.ts",
-    "lint:typings:fix": "tslint --fix typings/index.d.ts"
-  },
-  "dependencies": {
-    "m3u8stream": "file:./submodules/node-m3u8stream/",
-    "miniget": "file:./submodules/node-miniget/",
-    "sax": "^1.1.3"
-  },
-  "devDependencies": {
-    "@types/node": "^13.1.0",
-    "assert-diff": "^3.0.1",
-    "dtslint": "^3.6.14",
-    "eslint": "^6.8.0",
-    "mocha": "^7.0.0",
-    "muk-require": "^1.2.0",
-    "nock": "^13.0.4",
-    "nyc": "^15.0.0",
-    "sinon": "^9.0.0",
-    "stream-equal": "~1.1.0",
-    "typescript": "^3.9.7"
-  },
-  "engines": {
-    "node": ">=10"
-  },
-  "license": "MIT"
+},{"buffer":21,"stream":34,"string_decoder":69}],18:[function(require,module,exports){
+(function (process){(function (){
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
+const stream_1 = require("stream");
+/**
+ * URL constructor
+ *
+ * For compatibility with browser and Node.js APIs
+ */
+const URL = typeof window !== 'undefined' ? window.URL : require('url').URL; /* global window */
+const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
+const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
+const retryStatusCodes = new Set([429, 503]);
+// `request`, `response`, `abort`, left out, miniget will emit these.
+const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
+const responseEvents = ['aborted'];
+Miniget.MinigetError = class MinigetError extends Error {
+    constructor(message, statusCode) {
+        super(message);
+        this.statusCode = statusCode;
+    }
+};
+Miniget.defaultOptions = {
+    maxRedirects: 10,
+    maxRetries: 2,
+    maxReconnects: 0,
+    backoff: { inc: 100, max: 10000 },
+};
+function Miniget(url, options = {}) {
+    var _a;
+    const opts = Object.assign({}, Miniget.defaultOptions, options);
+    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
+    stream.destroyed = stream.aborted = false;
+    let activeRequest;
+    let activeResponse;
+    let activeDecodedStream;
+    let redirects = 0;
+    let retries = 0;
+    let retryTimeout;
+    let reconnects = 0;
+    let contentLength;
+    let acceptRanges = false;
+    let rangeStart = 0, rangeEnd;
+    let downloaded = 0;
+    // Check if this is a ranged request.
+    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
+        let r = /bytes=(\d+)-(\d+)?/.exec(`${opts.headers.Range}`);
+        if (r) {
+            rangeStart = parseInt(r[1], 10);
+            rangeEnd = parseInt(r[2], 10);
+        }
+    }
+    // Add `Accept-Encoding` header.
+    if (opts.acceptEncoding) {
+        opts.headers = Object.assign({
+            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', '),
+        }, opts.headers);
+    }
+    const downloadHasStarted = () => activeDecodedStream && downloaded > 0;
+    const downloadComplete = () => !acceptRanges || downloaded === contentLength;
+    const reconnect = (err) => {
+        activeDecodedStream = null;
+        retries = 0;
+        let inc = opts.backoff.inc;
+        let ms = Math.min(inc, opts.backoff.max);
+        retryTimeout = setTimeout(doDownload, ms);
+        stream.emit('reconnect', reconnects, err);
+    };
+    const reconnectIfEndedEarly = (err) => {
+        if (options.method !== 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
+            reconnect(err);
+            return true;
+        }
+        return false;
+    };
+    const retryRequest = (retryOptions) => {
+        if (stream.destroyed) {
+            return false;
+        }
+        if (downloadHasStarted()) {
+            return reconnectIfEndedEarly(retryOptions.err);
+        }
+        else if ((!retryOptions.err || retryOptions.err.message === 'ENOTFOUND') &&
+            retries++ < opts.maxRetries) {
+            let ms = retryOptions.retryAfter ||
+                Math.min(retries * opts.backoff.inc, opts.backoff.max);
+            retryTimeout = setTimeout(doDownload, ms);
+            stream.emit('retry', retries, retryOptions.err);
+            return true;
+        }
+        return false;
+    };
+    const forwardEvents = (ee, events) => {
+        for (let event of events) {
+            ee.on(event, stream.emit.bind(stream, event));
+        }
+    };
+    const doDownload = () => {
+        let parsed = {}, httpLib;
+        try {
+            let urlObj = typeof url === 'string' ? new URL(url) : url;
+            parsed = Object.assign({}, {
+                host: urlObj.host,
+                hostname: urlObj.hostname,
+                path: urlObj.pathname + urlObj.search + urlObj.hash,
+                port: urlObj.port,
+                protocol: urlObj.protocol,
+            });
+            if (urlObj.username) {
+                parsed.auth = `${urlObj.username}:${urlObj.password}`;
+            }
+            httpLib = httpLibs[String(parsed.protocol)];
+        }
+        catch (err) {
+            // Let the error be caught by the if statement below.
+        }
+        if (!httpLib) {
+            stream.emit('error', new Miniget.MinigetError(`Invalid URL: ${url}`));
+            return;
+        }
+        Object.assign(parsed, opts);
+        if (acceptRanges && downloaded > 0) {
+            let start = downloaded + rangeStart;
+            let end = rangeEnd || '';
+            parsed.headers = Object.assign({}, parsed.headers, {
+                Range: `bytes=${start}-${end}`,
+            });
+        }
+        if (opts.transform) {
+            try {
+                parsed = opts.transform(parsed);
+            }
+            catch (err) {
+                stream.emit('error', err);
+                return;
+            }
+            if (!parsed || parsed.protocol) {
+                httpLib = httpLibs[String(parsed === null || parsed === void 0 ? void 0 : parsed.protocol)];
+                if (!httpLib) {
+                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
+                    return;
+                }
+            }
+        }
+        const onError = (err) => {
+            if (stream.destroyed || stream.readableEnded) {
+                return;
+            }
+            // Needed for node v10.
+            if (stream._readableState.ended) {
+                return;
+            }
+            cleanup();
+            if (!retryRequest({ err })) {
+                stream.emit('error', err);
+            }
+            else {
+                activeRequest.removeListener('close', onRequestClose);
+            }
+        };
+        const onRequestClose = () => {
+            cleanup();
+            retryRequest({});
+        };
+        const cleanup = () => {
+            activeRequest.removeListener('close', onRequestClose);
+            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
+            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
+        };
+        const onData = (chunk) => { downloaded += chunk.length; };
+        const onEnd = () => {
+            cleanup();
+            if (!reconnectIfEndedEarly()) {
+                stream.end();
+            }
+        };
+        activeRequest = httpLib.request(parsed, (res) => {
+            // Needed for node v10, v12.
+            // istanbul ignore next
+            if (stream.destroyed) {
+                return;
+            }
+            if (redirectStatusCodes.has(res.statusCode)) {
+                if (redirects++ >= opts.maxRedirects) {
+                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
+                }
+                else {
+                    if (res.headers.location) {
+                        url = res.headers.location;
+                    }
+                    else {
+                        let err = new Miniget.MinigetError('Redirect status code given with no location', res.statusCode);
+                        stream.emit('error', err);
+                        cleanup();
+                        return;
+                    }
+                    setTimeout(doDownload, parseInt(res.headers['retry-after'] || '0', 10) * 1000);
+                    stream.emit('redirect', url);
+                }
+                cleanup();
+                return;
+                // Check for rate limiting.
+            }
+            else if (retryStatusCodes.has(res.statusCode)) {
+                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'] || '0', 10) })) {
+                    let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            else if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
+                let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                if (res.statusCode >= 500) {
+                    onError(err);
+                }
+                else {
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            activeDecodedStream = res;
+            if (opts.acceptEncoding && res.headers['content-encoding']) {
+                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
+                    let fn = opts.acceptEncoding[enc];
+                    if (fn) {
+                        activeDecodedStream = activeDecodedStream.pipe(fn());
+                        activeDecodedStream.on('error', onError);
+                    }
+                }
+            }
+            if (!contentLength) {
+                contentLength = parseInt(`${res.headers['content-length']}`, 10);
+                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
+                    contentLength > 0 && opts.maxReconnects > 0;
+            }
+            res.on('data', onData);
+            activeDecodedStream.on('end', onEnd);
+            activeDecodedStream.pipe(stream, { end: !acceptRanges });
+            activeResponse = res;
+            stream.emit('response', res);
+            res.on('error', onError);
+            forwardEvents(res, responseEvents);
+        });
+        activeRequest.on('error', onError);
+        activeRequest.on('close', onRequestClose);
+        forwardEvents(activeRequest, requestEvents);
+        if (stream.destroyed) {
+            streamDestroy(...destroyArgs);
+        }
+        stream.emit('request', activeRequest);
+        activeRequest.end();
+    };
+    stream.abort = (err) => {
+        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
+        stream.aborted = true;
+        stream.emit('abort');
+        stream.destroy(err);
+    };
+    let destroyArgs;
+    const streamDestroy = (err) => {
+        activeRequest.destroy(err);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
+        clearTimeout(retryTimeout);
+    };
+    stream._destroy = (...args) => {
+        stream.destroyed = true;
+        if (activeRequest) {
+            streamDestroy(...args);
+        }
+        else {
+            destroyArgs = args;
+        }
+    };
+    stream.text = () => new Promise((resolve, reject) => {
+        let body = '';
+        stream.setEncoding('utf8');
+        stream.on('data', chunk => body += chunk);
+        stream.on('end', () => resolve(body));
+        stream.on('error', reject);
+    });
+    process.nextTick(doDownload);
+    return stream;
 }
+module.exports = Miniget;
 
-},{}],18:[function(require,module,exports){
+}).call(this)}).call(this,require('_process'))
+},{"_process":27,"http":49,"https":24,"stream":34,"url":71}],19:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -5012,9 +5327,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],19:[function(require,module,exports){
-
 },{}],20:[function(require,module,exports){
+
+},{}],21:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -6795,7 +7110,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":18,"buffer":20,"ieee754":24}],21:[function(require,module,exports){
+},{"base64-js":19,"buffer":21,"ieee754":25}],22:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -6861,7 +7176,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],22:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -7360,7 +7675,7 @@ function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
   }
 }
 
-},{}],23:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 var http = require('http')
 var url = require('url')
 
@@ -7393,7 +7708,7 @@ function validateParams (params) {
   return params
 }
 
-},{"http":47,"url":69}],24:[function(require,module,exports){
+},{"http":49,"url":71}],25:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
@@ -7480,7 +7795,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],25:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -7509,7 +7824,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],26:[function(require,module,exports){
+},{}],27:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -7695,7 +8010,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 (function (global){(function (){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -8232,7 +8547,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8318,7 +8633,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8405,13 +8720,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":28,"./encode":29}],31:[function(require,module,exports){
+},{"./decode":29,"./encode":30}],32:[function(require,module,exports){
 /*! safe-buffer. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
@@ -8478,7 +8793,9 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":20}],32:[function(require,module,exports){
+},{"buffer":21}],33:[function(require,module,exports){
+arguments[4][17][0].apply(exports,arguments)
+},{"buffer":21,"dup":17,"stream":34,"string_decoder":69}],34:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8609,7 +8926,7 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":22,"inherits":25,"readable-stream/lib/_stream_duplex.js":34,"readable-stream/lib/_stream_passthrough.js":35,"readable-stream/lib/_stream_readable.js":36,"readable-stream/lib/_stream_transform.js":37,"readable-stream/lib/_stream_writable.js":38,"readable-stream/lib/internal/streams/end-of-stream.js":42,"readable-stream/lib/internal/streams/pipeline.js":44}],33:[function(require,module,exports){
+},{"events":23,"inherits":26,"readable-stream/lib/_stream_duplex.js":36,"readable-stream/lib/_stream_passthrough.js":37,"readable-stream/lib/_stream_readable.js":38,"readable-stream/lib/_stream_transform.js":39,"readable-stream/lib/_stream_writable.js":40,"readable-stream/lib/internal/streams/end-of-stream.js":44,"readable-stream/lib/internal/streams/pipeline.js":46}],35:[function(require,module,exports){
 'use strict';
 
 function _inheritsLoose(subClass, superClass) { subClass.prototype = Object.create(superClass.prototype); subClass.prototype.constructor = subClass; subClass.__proto__ = superClass; }
@@ -8738,7 +9055,7 @@ createErrorType('ERR_UNKNOWN_ENCODING', function (arg) {
 createErrorType('ERR_STREAM_UNSHIFT_AFTER_END_EVENT', 'stream.unshift() after end event');
 module.exports.codes = codes;
 
-},{}],34:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 (function (process){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -8880,7 +9197,7 @@ Object.defineProperty(Duplex.prototype, 'destroyed', {
   }
 });
 }).call(this)}).call(this,require('_process'))
-},{"./_stream_readable":36,"./_stream_writable":38,"_process":26,"inherits":25}],35:[function(require,module,exports){
+},{"./_stream_readable":38,"./_stream_writable":40,"_process":27,"inherits":26}],37:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8920,7 +9237,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":37,"inherits":25}],36:[function(require,module,exports){
+},{"./_stream_transform":39,"inherits":26}],38:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -10047,7 +10364,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":33,"./_stream_duplex":34,"./internal/streams/async_iterator":39,"./internal/streams/buffer_list":40,"./internal/streams/destroy":41,"./internal/streams/from":43,"./internal/streams/state":45,"./internal/streams/stream":46,"_process":26,"buffer":20,"events":22,"inherits":25,"string_decoder/":67,"util":19}],37:[function(require,module,exports){
+},{"../errors":35,"./_stream_duplex":36,"./internal/streams/async_iterator":41,"./internal/streams/buffer_list":42,"./internal/streams/destroy":43,"./internal/streams/from":45,"./internal/streams/state":47,"./internal/streams/stream":48,"_process":27,"buffer":21,"events":23,"inherits":26,"string_decoder/":69,"util":20}],39:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -10249,7 +10566,7 @@ function done(stream, er, data) {
   if (stream._transformState.transforming) throw new ERR_TRANSFORM_ALREADY_TRANSFORMING();
   return stream.push(null);
 }
-},{"../errors":33,"./_stream_duplex":34,"inherits":25}],38:[function(require,module,exports){
+},{"../errors":35,"./_stream_duplex":36,"inherits":26}],40:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -10949,7 +11266,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":33,"./_stream_duplex":34,"./internal/streams/destroy":41,"./internal/streams/state":45,"./internal/streams/stream":46,"_process":26,"buffer":20,"inherits":25,"util-deprecate":71}],39:[function(require,module,exports){
+},{"../errors":35,"./_stream_duplex":36,"./internal/streams/destroy":43,"./internal/streams/state":47,"./internal/streams/stream":48,"_process":27,"buffer":21,"inherits":26,"util-deprecate":73}],41:[function(require,module,exports){
 (function (process){(function (){
 'use strict';
 
@@ -11159,7 +11476,7 @@ var createReadableStreamAsyncIterator = function createReadableStreamAsyncIterat
 
 module.exports = createReadableStreamAsyncIterator;
 }).call(this)}).call(this,require('_process'))
-},{"./end-of-stream":42,"_process":26}],40:[function(require,module,exports){
+},{"./end-of-stream":44,"_process":27}],42:[function(require,module,exports){
 'use strict';
 
 function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); if (enumerableOnly) symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; }); keys.push.apply(keys, symbols); } return keys; }
@@ -11370,7 +11687,7 @@ function () {
 
   return BufferList;
 }();
-},{"buffer":20,"util":19}],41:[function(require,module,exports){
+},{"buffer":21,"util":20}],43:[function(require,module,exports){
 (function (process){(function (){
 'use strict'; // undocumented cb() API, needed for core, not for public API
 
@@ -11478,7 +11795,7 @@ module.exports = {
   errorOrDestroy: errorOrDestroy
 };
 }).call(this)}).call(this,require('_process'))
-},{"_process":26}],42:[function(require,module,exports){
+},{"_process":27}],44:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/end-of-stream with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -11583,12 +11900,12 @@ function eos(stream, opts, callback) {
 }
 
 module.exports = eos;
-},{"../../../errors":33}],43:[function(require,module,exports){
+},{"../../../errors":35}],45:[function(require,module,exports){
 module.exports = function () {
   throw new Error('Readable.from is not available in the browser')
 };
 
-},{}],44:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/pump with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -11686,7 +12003,7 @@ function pipeline() {
 }
 
 module.exports = pipeline;
-},{"../../../errors":33,"./end-of-stream":42}],45:[function(require,module,exports){
+},{"../../../errors":35,"./end-of-stream":44}],47:[function(require,module,exports){
 'use strict';
 
 var ERR_INVALID_OPT_VALUE = require('../../../errors').codes.ERR_INVALID_OPT_VALUE;
@@ -11714,10 +12031,10 @@ function getHighWaterMark(state, options, duplexKey, isDuplex) {
 module.exports = {
   getHighWaterMark: getHighWaterMark
 };
-},{"../../../errors":33}],46:[function(require,module,exports){
+},{"../../../errors":35}],48:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":22}],47:[function(require,module,exports){
+},{"events":23}],49:[function(require,module,exports){
 (function (global){(function (){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -11805,7 +12122,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":49,"./lib/response":50,"builtin-status-codes":21,"url":69,"xtend":72}],48:[function(require,module,exports){
+},{"./lib/request":51,"./lib/response":52,"builtin-status-codes":22,"url":71,"xtend":74}],50:[function(require,module,exports){
 (function (global){(function (){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -11868,7 +12185,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],49:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -12224,7 +12541,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":48,"./response":50,"_process":26,"buffer":20,"inherits":25,"readable-stream":65}],50:[function(require,module,exports){
+},{"./capability":50,"./response":52,"_process":27,"buffer":21,"inherits":26,"readable-stream":67}],52:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -12439,35 +12756,35 @@ IncomingMessage.prototype._onXHRProgress = function (resetTimers) {
 }
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":48,"_process":26,"buffer":20,"inherits":25,"readable-stream":65}],51:[function(require,module,exports){
-arguments[4][33][0].apply(exports,arguments)
-},{"dup":33}],52:[function(require,module,exports){
-arguments[4][34][0].apply(exports,arguments)
-},{"./_stream_readable":54,"./_stream_writable":56,"_process":26,"dup":34,"inherits":25}],53:[function(require,module,exports){
+},{"./capability":50,"_process":27,"buffer":21,"inherits":26,"readable-stream":67}],53:[function(require,module,exports){
 arguments[4][35][0].apply(exports,arguments)
-},{"./_stream_transform":55,"dup":35,"inherits":25}],54:[function(require,module,exports){
+},{"dup":35}],54:[function(require,module,exports){
 arguments[4][36][0].apply(exports,arguments)
-},{"../errors":51,"./_stream_duplex":52,"./internal/streams/async_iterator":57,"./internal/streams/buffer_list":58,"./internal/streams/destroy":59,"./internal/streams/from":61,"./internal/streams/state":63,"./internal/streams/stream":64,"_process":26,"buffer":20,"dup":36,"events":22,"inherits":25,"string_decoder/":67,"util":19}],55:[function(require,module,exports){
+},{"./_stream_readable":56,"./_stream_writable":58,"_process":27,"dup":36,"inherits":26}],55:[function(require,module,exports){
 arguments[4][37][0].apply(exports,arguments)
-},{"../errors":51,"./_stream_duplex":52,"dup":37,"inherits":25}],56:[function(require,module,exports){
+},{"./_stream_transform":57,"dup":37,"inherits":26}],56:[function(require,module,exports){
 arguments[4][38][0].apply(exports,arguments)
-},{"../errors":51,"./_stream_duplex":52,"./internal/streams/destroy":59,"./internal/streams/state":63,"./internal/streams/stream":64,"_process":26,"buffer":20,"dup":38,"inherits":25,"util-deprecate":71}],57:[function(require,module,exports){
+},{"../errors":53,"./_stream_duplex":54,"./internal/streams/async_iterator":59,"./internal/streams/buffer_list":60,"./internal/streams/destroy":61,"./internal/streams/from":63,"./internal/streams/state":65,"./internal/streams/stream":66,"_process":27,"buffer":21,"dup":38,"events":23,"inherits":26,"string_decoder/":69,"util":20}],57:[function(require,module,exports){
 arguments[4][39][0].apply(exports,arguments)
-},{"./end-of-stream":60,"_process":26,"dup":39}],58:[function(require,module,exports){
+},{"../errors":53,"./_stream_duplex":54,"dup":39,"inherits":26}],58:[function(require,module,exports){
 arguments[4][40][0].apply(exports,arguments)
-},{"buffer":20,"dup":40,"util":19}],59:[function(require,module,exports){
+},{"../errors":53,"./_stream_duplex":54,"./internal/streams/destroy":61,"./internal/streams/state":65,"./internal/streams/stream":66,"_process":27,"buffer":21,"dup":40,"inherits":26,"util-deprecate":73}],59:[function(require,module,exports){
 arguments[4][41][0].apply(exports,arguments)
-},{"_process":26,"dup":41}],60:[function(require,module,exports){
+},{"./end-of-stream":62,"_process":27,"dup":41}],60:[function(require,module,exports){
 arguments[4][42][0].apply(exports,arguments)
-},{"../../../errors":51,"dup":42}],61:[function(require,module,exports){
+},{"buffer":21,"dup":42,"util":20}],61:[function(require,module,exports){
 arguments[4][43][0].apply(exports,arguments)
-},{"dup":43}],62:[function(require,module,exports){
+},{"_process":27,"dup":43}],62:[function(require,module,exports){
 arguments[4][44][0].apply(exports,arguments)
-},{"../../../errors":51,"./end-of-stream":60,"dup":44}],63:[function(require,module,exports){
+},{"../../../errors":53,"dup":44}],63:[function(require,module,exports){
 arguments[4][45][0].apply(exports,arguments)
-},{"../../../errors":51,"dup":45}],64:[function(require,module,exports){
+},{"dup":45}],64:[function(require,module,exports){
 arguments[4][46][0].apply(exports,arguments)
-},{"dup":46,"events":22}],65:[function(require,module,exports){
+},{"../../../errors":53,"./end-of-stream":62,"dup":46}],65:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"../../../errors":53,"dup":47}],66:[function(require,module,exports){
+arguments[4][48][0].apply(exports,arguments)
+},{"dup":48,"events":23}],67:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -12478,7 +12795,7 @@ exports.PassThrough = require('./lib/_stream_passthrough.js');
 exports.finished = require('./lib/internal/streams/end-of-stream.js');
 exports.pipeline = require('./lib/internal/streams/pipeline.js');
 
-},{"./lib/_stream_duplex.js":52,"./lib/_stream_passthrough.js":53,"./lib/_stream_readable.js":54,"./lib/_stream_transform.js":55,"./lib/_stream_writable.js":56,"./lib/internal/streams/end-of-stream.js":60,"./lib/internal/streams/pipeline.js":62}],66:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":54,"./lib/_stream_passthrough.js":55,"./lib/_stream_readable.js":56,"./lib/_stream_transform.js":57,"./lib/_stream_writable.js":58,"./lib/internal/streams/end-of-stream.js":62,"./lib/internal/streams/pipeline.js":64}],68:[function(require,module,exports){
 /*! stream-to-blob. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* global Blob */
 
@@ -12502,7 +12819,7 @@ function streamToBlob (stream, mimeType) {
   })
 }
 
-},{}],67:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12799,7 +13116,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":31}],68:[function(require,module,exports){
+},{"safe-buffer":32}],70:[function(require,module,exports){
 (function (setImmediate,clearImmediate){(function (){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -12878,7 +13195,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this)}).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":26,"timers":68}],69:[function(require,module,exports){
+},{"process/browser.js":27,"timers":70}],71:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13612,7 +13929,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":70,"punycode":27,"querystring":30}],70:[function(require,module,exports){
+},{"./util":72,"punycode":28,"querystring":31}],72:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -13630,7 +13947,7 @@ module.exports = {
   }
 };
 
-},{}],71:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 (function (global){(function (){
 
 /**
@@ -13701,7 +14018,7 @@ function config (name) {
 }
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],72:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -13722,7 +14039,7 @@ function extend() {
     return target
 }
 
-},{}],73:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 const {rand, irand, CallableInstance} = require('./utils')
 
 class Looper extends CallableInstance {
@@ -13792,7 +14109,7 @@ class Looper extends CallableInstance {
 }
 
 module.exports = Looper
-},{"./utils":75}],74:[function(require,module,exports){
+},{"./utils":77}],76:[function(require,module,exports){
 const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
 const YoutubePlayer = require('./youtubeFunctions')
@@ -13816,7 +14133,7 @@ const getBlob = (url) => {
 }
 
 window.preload = getBlob
-},{"./looper":73,"./youtubeFunctions":76,"stream-to-blob":66,"ytdl-core":4}],75:[function(require,module,exports){
+},{"./looper":75,"./youtubeFunctions":78,"stream-to-blob":68,"ytdl-core":4}],77:[function(require,module,exports){
 const rand = (lo = 0, hi = 1) => Math.random() * (hi -lo) + lo
 const irand = (lo = 0, hi = 1) => Math.round(Math.random() * (hi -lo) + lo)
 
@@ -13832,7 +14149,7 @@ function CallableInstance(property) {
 CallableInstance.prototype = Object.create(Function.prototype);
 
 module.exports = {rand, irand, CallableInstance}
-},{}],76:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 const {rand, irand} = require('./utils')
 
 class YoutubePlayer {
@@ -13878,4 +14195,4 @@ class YoutubePlayer {
 
 module.exports = YoutubePlayer
 
-},{"./utils":75}]},{},[74]);
+},{"./utils":77}]},{},[76]);

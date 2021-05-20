@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "browserify src/main.js -o dist/ytSamplerTools.js",
+    "build": "npm run build-max && npm run build-min",
+    "build-max": "browserify src/main.js -o dist/ytSamplerTools.js",
+    "build-min": "browserify src/main.js -g uglifyify -o dist/ytSamplerTools.min.js",
     "watch": "watchify src/main.js -o dist/ytSamplerTools.js --debug --verbose ",
     "start": "http-server www -a 0.0.0.0",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -18,6 +20,7 @@
   "devDependencies": {
     "browserify": "^17.0.0",
     "http-server": "^0.12.3",
+    "uglifyify": "^5.0.2",
     "watchify": "^4.0.0"
   }
 }
