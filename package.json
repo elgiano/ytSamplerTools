@@ -1,0 +1,23 @@
+{
+  "name": "ytSamplerTools",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "browserify src/main.js -o dist/ytSamplerTools.js",
+    "watch": "watchify src/main.js -o dist/ytSamplerTools.js --debug --verbose ",
+    "start": "http-server www -a 0.0.0.0",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "stream-to-blob": "^2.0.1",
+    "ytdl-core": "file:./node-ytdl-core-patched/"
+  },
+  "devDependencies": {
+    "browserify": "^17.0.0",
+    "http-server": "^0.12.3",
+    "watchify": "^4.0.0"
+  }
+}
