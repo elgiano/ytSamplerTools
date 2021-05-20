@@ -8,7 +8,7 @@
     "build-max": "browserify src/main.js -o dist/ytSamplerTools.js",
     "build-min": "browserify src/main.js -g uglifyify -o dist/ytSamplerTools.min.js",
     "watch": "watchify src/main.js -o dist/ytSamplerTools.js --debug --verbose ",
-    "start": "http-server www -a 0.0.0.0",
+    "start": "http-server dist -a 0.0.0.0",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",

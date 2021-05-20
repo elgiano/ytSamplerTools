@@ -28,32 +28,33 @@ class Looper extends CallableInstance {
         let delta = this.loops[name].fnDelta || 0.1;
         if (typeof delta === 'function') delta = this.loops[name].fnDelta()
         console.log(`[${name}] next: ${delta}`);
-        this.loops[name].fn(); 
-        this.loops[name].id = setTimeout(()=>runLoop(name), delta * 1000)
+        this.loops[name].fn();
+        clearInterval(this.loops[name].id); 
+        this.loops[name].id = setTimeout(()=>this.run(name), delta * 1000)
     }
 
     call(...args) { this.add(...args) };
 
     stut(delta) { 
-        if(delta <= 0) pauseLoop('stut')
+        if(delta <= 0) this.pause('stut')
         else { 
-            this.add('stut', () => sampler.seekDelta(-delta), () => delta / this.speed)
+            this.add('stut', () => this.sampler.seekDelta(-delta), () => delta)
         }
     }
 
     stutCur(delta) { 
-        const pos = curPos();
-        if(delta <= 0) pauseLoop('stut')
+        const pos = this.sampler.curPos;
+        if(delta <= 0) this.pause('stut')
         else { 
-            this.add('stut', () => sampler.seek(pos), () => delta / this.speed)
+            this.add('stut', () => this.sampler.seek(pos), () => delta)
         }
     }
 
     stutCurRand(lo = 0.1, hi = 0.2) { 
-        const pos = curPos();
-        if(delta <= 0) pauseLoop('stut')
+        const pos = this.sampler.curPos;
+        if(delta <= 0) this.pause('stut')
         else { 
-            this.add('stut', () => sampler.seek(pos), () => rand(lo, hi) / this.speed)
+            this.add('stut', () => this.sampler.seek(pos), () => rand(lo, hi))
         }
     }
 
@@ -62,7 +63,7 @@ class Looper extends CallableInstance {
     }
 
     skip(name, lo, hi, loDelta, hiDelta) { 
-        this.add(name, ()=> this.seekDrand(lo, hi), ()=> rand(lo, hi) / this.speed )
+        this.add(name, ()=> this.sampler.seekDrand(lo, hi), ()=> rand(lo, hi))
     }
 }
 

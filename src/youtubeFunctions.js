@@ -15,9 +15,9 @@ class YoutubePlayer {
     seekDrand(lo = -1, hi = 1) { this.seekDelta(rand(lo,hi)) }
     seekD(delta, hi) { hi === undefined ? this.seekDelta(delta) : this.seekDrand(delta, hi) }
 
-    set speed(newSpeed) { this.v.playbackRate = newSpeed }
-    modSpeed(speedRatio) { this.speed = this.speed * speedRatio }
-    randSpeed(lo=-3, hi=3) { this.speed = Math.pow(2, rand(lo, hi)) }
+    set speed(newSpeed) { this.v.playbackRate = newSpeed < 0.25 ? 0.25 : newSpeed > 4 ? 4 : newSpeed }
+    modSpeed(ratio, hi) { if(hi !== undefined) ratio = rand(ratio, hi); this.speed = this.speed * ratio; return this.speed }
+    randSpeed(lo=-3, hi=3) { this.speed = Math.pow(2, rand(lo, hi)); return this.speed }
     sp(newSpeed, hi) { 
         if (newSpeed != undefined) {
             if (hi != undefined) randSpeed(newSpeed, hi)
