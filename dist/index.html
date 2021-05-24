@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Play youtube like a sampler with these JavaScript tools" />
+    <title>youtube sampler tools</title>
+    <style>
+        html, body {
+            margin: 0; padding: 0
+        }
+        main {
+            display: flex;
+            width: 100%; height:100vh;
+            align-items: center;
+            justify-content: center
+        }
+        h1 {
+            font-family: serif
+        }
+        #bookmarklet {
+            padding: 1em;
+            background: #111;
+            color: #dedede;
+            margin: 1em;
+            border-radius: 1em;
+            text-decoration: none;
+            font-family: sans;
+        }
+    </style>
+</head>
+<body>
+    <noscript>Sorry, this page doesnt't work without Javascript. Please make sure you have it enabled.</noscript>
+    <main>
+        <h1>ytSamplerTools</h1>
+        <a href="#" id="bookmarklet">Add me to your bookmarks!</a>
+    </main>
+    <script>
+        const origin = window.location.origin
+        const path = window.location.pathname.split('/').slice(0, -1).join('/');
+        const href = `javascript:(function(){s = document.createElement("script"); s.type = "text/javascript"; s.src = "${origin + path}/ytSamplerTools.js"; document.head.appendChild(s)})()`
+        console.log(href)
+        document.querySelector('#bookmarklet').href = href
+    </script>
+</body>
+</html>

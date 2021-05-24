@@ -21,7 +21,7 @@ class Looper extends CallableInstance {
     isPlaying(name) { return (!this.has(name)) ? (false) : (this.loops[name].playing) }
     pause(name) { if(this.has(name)) { this.loops[name].playing = false } };
     play(name) { if(this.has(name)) { this.loops[name].playing = true; this.run(name) } };
-    toggle(name) { if(this.has(name)) { this.isPlaying(name) ? pauseLoop(name) : playLoop(name) } };
+    toggle(name) { if(this.has(name)) { this.isPlaying(name) ? this.pause(name) : this.play(name) } };
 
     run(name) {
         if(!this.isPlaying(name)) return
@@ -29,7 +29,8 @@ class Looper extends CallableInstance {
         if (typeof delta === 'function') delta = this.loops[name].fnDelta()
         console.log(`[${name}] next: ${delta}`);
         this.loops[name].fn();
-        clearInterval(this.loops[name].id); 
+        delta = (typeof delta != 'number') ? 0.1 : Math.max(0.1, delta)
+        clearInterval(this.loops[name].id)
         this.loops[name].id = setTimeout(()=>this.run(name), delta * 1000)
     }
 
@@ -63,7 +64,12 @@ class Looper extends CallableInstance {
     }
 
     skip(name, lo, hi, loDelta, hiDelta) { 
-        this.add(name, ()=> this.sampler.seekDrand(lo, hi), ()=> rand(lo, hi))
+        this.add(name, ()=> this.sampler.seekDrand(lo, hi), ()=> rand(loDelta, hiDelta))
+    }
+
+    skip2(name, pos, loDelta, hiDelta) { 
+        hiDelta = hiDelta || loDelta
+        this.add(name, ()=> this.sampler.seek(pos), ()=> rand(loDelta, hiDelta))
     }
 }
 

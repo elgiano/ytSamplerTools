@@ -2,12 +2,14 @@ const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
 const YoutubePlayer = require('./youtubeFunctions')
 const Looper = require('./looper')
+const KeyboardLooper = require('./keyboard')
 const {rand, irand, coin, choose} = require('./utils')
 
 window.ytdl = ytdl
 window.s2b = s2b
 window.y = new YoutubePlayer()
 window.l = new Looper(window.y)
+window.k = new KeyboardLooper(window.y, window.l);
 Object.assign(window, {rand, irand, coin, choose})
 
 const getBlob = (url) => {
@@ -26,10 +28,16 @@ const getBlob = (url) => {
         }
     })
     s2b(stream).then(blob => {
+        const video = document.querySelector('video')
         console.log('[Preloading] got blob:', blob);
-        document.querySelector('video').src = URL.createObjectURL(blob)
+        const play = !video.paused
+        const pos = video.currentTime
+        video.src = URL.createObjectURL(blob)
+        video.currentTime = pos
+        if(play) document.querySelector('video').play()
     })
     return stream
 }
 
 window.preload = getBlob
+
