@@ -3,6 +3,7 @@ class KeyboardLooper {
         this.loops = {}
         this.keyupListenerFn = (e) => this.keyUp(e)
         this.keydownListenerFn = (e) => this.keyDown(e)
+        this.mousedownListenerFn = (e) => this.mouseDown(e)
         this.looper = looper
         this.speeds = [4/9, 8/15, 2/3, 4/5, 1, 5/4, 3/2, 15/8, 9/4]
         this.bind(sampler)
@@ -85,9 +86,16 @@ class KeyboardLooper {
             event.stopImmediatePropagation();
     }
 
+    mouseDown(event) {
+        //console.log(event.target)
+        if(event.target.tagName.toLowerCase() == 'video')
+            event.stopImmediatePropagation();
+    }
+
     bind(sampler) {
         if(sampler) this.sampler = sampler;
         window.addEventListener('keydown', this.keydownListenerFn, true)
+        window.addEventListener('click', this.mousedownListenerFn, true)
         window.addEventListener('keyup', this.keyupListenerFn, true)
 
     }
@@ -95,6 +103,7 @@ class KeyboardLooper {
     unbind() {
         window.removeEventListener('keydown', this.keydownListenerFn, true)
         window.removeEventListener('keyup', this.keyupListenerFn, true)
+        window.removeEventListener('click', this.mousedownListenerFn, true)
     }
 
 }

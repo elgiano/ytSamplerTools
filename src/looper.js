@@ -53,7 +53,7 @@ class Looper extends CallableInstance {
 
     stutCurRand(lo = 0.1, hi = 0.2) { 
         const pos = this.sampler.curPos;
-        if(delta <= 0) this.pause('stut')
+        if(lo <= 0) this.pause('stut')
         else { 
             this.add('stut', () => this.sampler.seek(pos), () => rand(lo, hi))
         }
@@ -63,8 +63,11 @@ class Looper extends CallableInstance {
         (hi != undefined) ? this.stutCurRand(delta, hi) : this.stutCur(delta)  
     }
 
-    skip(name, lo, hi, loDelta, hiDelta) { 
-        this.add(name, ()=> this.sampler.seekDrand(lo, hi), ()=> rand(loDelta, hiDelta))
+    skip(name, lo, hi, loDelta, hiDelta) {
+        hi = hi || lo
+        loDelta = loDelta || Math.abs(lo)
+        hiDelta = hiDelta || loDelta
+        this.add(name, ()=> this.sampler.seekD(lo, hi), ()=> rand(loDelta, hiDelta))
     }
 
     skip2(name, pos, loDelta, hiDelta) { 

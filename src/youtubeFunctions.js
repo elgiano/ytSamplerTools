@@ -38,6 +38,7 @@ class YoutubePlayer {
             console.warn("[pitchShift] not supported by this browser")
         }
     }
+    ps(activate = true) { this.pitchShift(activate) }
 
 }
 
