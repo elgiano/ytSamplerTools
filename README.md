@@ -1,5 +1,5 @@
 ## ytSamplerTools
-Some javscript tools to play youtube as a sampler
+Some javascript tools to play youtube as a sampler
 
 ### Installation
 You can install ytSamplerTools as a bookmarklet. Just go to [gianlucaelia.eu/ytSamplerTools](https://gianlucaelia.eu/ytSamplerTools), right click on the astronaut and save it as a bookmark.
