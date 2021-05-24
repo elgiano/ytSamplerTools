@@ -14252,7 +14252,7 @@ Object.assign(window, {rand, irand, coin, choose})
 const forwardFunc = (obj, name) => {
     window[name] = (...args) => obj[name](...args)
 }
-const forwardPlayer = ['sp', 'ps', 'modSpeed', 'seek', 'seekD']
+const forwardPlayer = ['sp', 'ps', 'modSpeed', 'seek', 'seekD', 'seekRand', 'randSpeed']
 const forwardLooper = ['stut', 'stut2', 'skip', 'skip2']
 for(const name of forwardPlayer) { forwardFunc(window.y, name) }
 for(const name of forwardLooper) { forwardFunc(window.l, name) }
