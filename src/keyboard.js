@@ -6,7 +6,43 @@ class KeyboardLooper {
         this.mousedownListenerFn = (e) => this.mouseDown(e)
         this.looper = looper
         this.speeds = [4/9, 8/15, 2/3, 4/5, 1, 5/4, 3/2, 15/8, 9/4]
+        this.initDefaultKeymap();
         this.bind(sampler)
+    }
+
+    initDefaultKeymap() {
+        this.keymap = {
+            'ArrowUp': (e) => {
+                const delta = e.shiftKey ? 0.001 : e.ctrlKey ? 0.1 : 0.01;
+                this.sampler.vol += delta
+            },
+            'ArrowDown': (e) => {
+                const delta = e.shiftKey ? 0.001 : e.ctrlKey ? 0.1 : 0.01;
+                this.sampler.vol -= delta
+            },
+        }
+
+        for(const name of 'qwertyuiop') {
+            this.keymap[name] = (e) => {
+                //this.toggleLoop(name, this.sampler.curPos);
+                this.skipTo(name)
+            } 
+        }
+        for(let name of 'QWERTYUIOP') {
+            this.keymap[name] = (e) => {
+                name = name.toLowerCase()
+                if(!this.has(name) || this.hasComplete(name))
+                    this.initLoop(name, this.sampler.curPos);
+            } 
+        } 
+        for(const nSpeed in 'asdfghjkl') {
+            const name = 'asdfghjkl'.charAt(nSpeed)
+            this.keymap[name] = (e) => {
+                this.sampler.speed = this.speeds[nSpeed]
+            }
+        }
+
+        this.keymap['z'] = (e) => this.sampler.togglePitchShift()
     }
 
     has(name) { return !!this.loops[name] }
@@ -65,25 +101,11 @@ class KeyboardLooper {
     }
 
     keyDown(event) {
-        let name = event.key;
-        let stopPropagation = false;
-        if('qwertyuiop'.includes(name)) {
-            //this.toggleLoop(name, this.sampler.curPos);
-            this.skipTo(name)
-            stopPropagation = true
-        } else if('QWERTYUIOP'.includes(name)) {
-            name = name.toLowerCase()
-            if(!this.has(name) || this.hasComplete(name))
-                this.initLoop(name, this.sampler.curPos);
-            stopPropagation = true
-        } else if('asdfghjkl'.includes(name)) {
-            const nSpeed = 'asdfghjkl'.split('').indexOf(name)
-            this.sampler.speed = this.speeds[nSpeed]
-            stopPropagation = true
+        const name = event.key;
+        if(this.keymap.hasOwnProperty(name)) {
+            this.keymap[name](event);
+            event.stopImmediatePropagation()
         }
-        
-        if (stopPropagation)
-            event.stopImmediatePropagation();
     }
 
     mouseDown(event) {

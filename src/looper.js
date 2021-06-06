@@ -25,11 +25,15 @@ class Looper extends CallableInstance {
 
     run(name) {
         if(!this.isPlaying(name)) return
+        this.loops[name].fn();
         let delta = this.loops[name].fnDelta || 0.1;
         if (typeof delta === 'function') delta = this.loops[name].fnDelta()
+        if (typeof delta != 'number') {
+            console.log(`[${name}] delta is not a number: stopping`);
+            this.pause(name)
+        }
+        delta = Math.max(0.1, delta)
         console.log(`[${name}] next: ${delta}`);
-        this.loops[name].fn();
-        delta = (typeof delta != 'number') ? 0.1 : Math.max(0.1, delta)
         clearInterval(this.loops[name].id)
         this.loops[name].id = setTimeout(()=>this.run(name), delta * 1000)
     }

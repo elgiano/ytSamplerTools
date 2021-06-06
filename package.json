@@ -15,7 +15,7 @@
   "license": "ISC",
   "dependencies": {
     "stream-to-blob": "^2.0.1",
-    "ytdl-core": "file:./node-ytdl-core-patched/"
+    "ytdl-core": "^4.8.2"
   },
   "devDependencies": {
     "browserify": "^17.0.0",

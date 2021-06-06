@@ -40,6 +40,23 @@ class YoutubePlayer {
     }
     ps(activate = true) { this.pitchShift(activate) }
 
+    togglePitchShift() {
+        const video = this.v;
+        if (video.preservesPitch != undefined) { 
+            video.preservesPitch = !video.preservesPitch
+        } else if (video.mozPreservesPitch != undefined) {
+            video.mozPreservesPitch = !video.mozPreservesPitch
+        } else if (video.webkitPreservesPitch != undefined) {
+            video.webkitPreservesPitch = !video.webkitPreservesPitch
+        } else {
+            console.warn("[pitchShift] not supported by this browser")
+        }
+        
+    }
+
+    get vol() { return this.v.volume }
+    set vol(newVol) { this.v.volume = newVol }
+
 }
 
 module.exports = YoutubePlayer

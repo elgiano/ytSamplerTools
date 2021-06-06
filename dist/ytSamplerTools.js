@@ -1,2438 +1,4 @@
 (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
-const { setTimeout } = require('timers');
-
-// A cache that expires.
-module.exports = class Cache extends Map {
-  constructor(timeout = 1000) {
-    super();
-    this.timeout = timeout;
-  }
-  set(key, value) {
-    if (this.has(key)) {
-      clearTimeout(super.get(key).tid);
-    }
-    super.set(key, {
-      tid: setTimeout(this.delete.bind(this, key), this.timeout).unref(),
-      value,
-    });
-  }
-  get(key) {
-    let entry = super.get(key);
-    if (entry) {
-      return entry.value;
-    }
-    return null;
-  }
-  getOrSet(key, fn) {
-    if (this.has(key)) {
-      return this.get(key);
-    } else {
-      let value = fn();
-      this.set(key, value);
-      (async() => {
-        try {
-          await value;
-        } catch (err) {
-          this.delete(key);
-        }
-      })();
-      return value;
-    }
-  }
-  delete(key) {
-    let entry = super.get(key);
-    if (entry) {
-      clearTimeout(entry.tid);
-      super.delete(key);
-    }
-  }
-  clear() {
-    for (let entry of this.values()) {
-      clearTimeout(entry.tid);
-    }
-    super.clear();
-  }
-};
-
-},{"timers":70}],2:[function(require,module,exports){
-const utils = require('./utils');
-const FORMATS = require('./formats');
-
-
-// Use these to help sort formats, higher index is better.
-const audioEncodingRanks = [
-  'mp4a',
-  'mp3',
-  'vorbis',
-  'aac',
-  'opus',
-  'flac',
-];
-const videoEncodingRanks = [
-  'mp4v',
-  'avc1',
-  'Sorenson H.283',
-  'MPEG-4 Visual',
-  'VP8',
-  'VP9',
-  'H.264',
-];
-
-const getVideoBitrate = format => format.bitrate || 0;
-const getVideoEncodingRank = format =>
-  videoEncodingRanks.findIndex(enc => format.codecs && format.codecs.includes(enc));
-const getAudioBitrate = format => format.audioBitrate || 0;
-const getAudioEncodingRank = format =>
-  audioEncodingRanks.findIndex(enc => format.codecs && format.codecs.includes(enc));
-
-
-/**
- * Sort formats by a list of functions.
- *
- * @param {Object} a
- * @param {Object} b
- * @param {Array.<Function>} sortBy
- * @returns {number}
- */
-const sortFormatsBy = (a, b, sortBy) => {
-  let res = 0;
-  for (let fn of sortBy) {
-    res = fn(b) - fn(a);
-    if (res !== 0) {
-      break;
-    }
-  }
-  return res;
-};
-
-
-const sortFormatsByVideo = (a, b) => sortFormatsBy(a, b, [
-  format => parseInt(format.qualityLabel),
-  getVideoBitrate,
-  getVideoEncodingRank,
-]);
-
-
-const sortFormatsByAudio = (a, b) => sortFormatsBy(a, b, [
-  getAudioBitrate,
-  getAudioEncodingRank,
-]);
-
-
-/**
- * Sort formats from highest quality to lowest.
- *
- * @param {Object} a
- * @param {Object} b
- * @returns {number}
- */
-exports.sortFormats = (a, b) => sortFormatsBy(a, b, [
-  // Formats with both video and audio are ranked highest.
-  format => +!!format.isHLS,
-  format => +!!format.isDashMPD,
-  format => +(format.contentLength > 0),
-  format => +(format.hasVideo && format.hasAudio),
-  format => +format.hasVideo,
-  format => parseInt(format.qualityLabel) || 0,
-  getVideoBitrate,
-  getAudioBitrate,
-  getVideoEncodingRank,
-  getAudioEncodingRank,
-]);
-
-
-/**
- * Choose a format depending on the given options.
- *
- * @param {Array.<Object>} formats
- * @param {Object} options
- * @returns {Object}
- * @throws {Error} when no format matches the filter/format rules
- */
-exports.chooseFormat = (formats, options) => {
-  if (typeof options.format === 'object') {
-    if (!options.format.url) {
-      throw Error('Invalid format given, did you use `ytdl.getInfo()`?');
-    }
-    return options.format;
-  }
-
-  if (options.filter) {
-    formats = exports.filterFormats(formats, options.filter);
-  }
-
-  let format;
-  const quality = options.quality || 'highest';
-  switch (quality) {
-    case 'highest':
-      format = formats[0];
-      break;
-
-    case 'lowest':
-      format = formats[formats.length - 1];
-      break;
-
-    case 'highestaudio':
-      formats = exports.filterFormats(formats, 'audio');
-      formats.sort(sortFormatsByAudio);
-      format = formats[0];
-      break;
-
-    case 'lowestaudio':
-      formats = exports.filterFormats(formats, 'audio');
-      formats.sort(sortFormatsByAudio);
-      format = formats[formats.length - 1];
-      break;
-
-    case 'highestvideo':
-      formats = exports.filterFormats(formats, 'video');
-      formats.sort(sortFormatsByVideo);
-      format = formats[0];
-      break;
-
-    case 'lowestvideo':
-      formats = exports.filterFormats(formats, 'video');
-      formats.sort(sortFormatsByVideo);
-      format = formats[formats.length - 1];
-      break;
-
-    default:
-      format = getFormatByQuality(quality, formats);
-      break;
-  }
-
-  if (!format) {
-    throw Error(`No such format found: ${quality}`);
-  }
-  return format;
-};
-
-/**
- * Gets a format based on quality or array of quality's
- *
- * @param {string|[string]} quality
- * @param {[Object]} formats
- * @returns {Object}
- */
-const getFormatByQuality = (quality, formats) => {
-  let getFormat = itag => formats.find(format => `${format.itag}` === `${itag}`);
-  if (Array.isArray(quality)) {
-    return getFormat(quality.find(q => getFormat(q)));
-  } else {
-    return getFormat(quality);
-  }
-};
-
-
-/**
- * @param {Array.<Object>} formats
- * @param {Function} filter
- * @returns {Array.<Object>}
- */
-exports.filterFormats = (formats, filter) => {
-  let fn;
-  switch (filter) {
-    case 'videoandaudio':
-    case 'audioandvideo':
-      fn = format => format.hasVideo && format.hasAudio;
-      break;
-
-    case 'video':
-      fn = format => format.hasVideo;
-      break;
-
-    case 'videoonly':
-      fn = format => format.hasVideo && !format.hasAudio;
-      break;
-
-    case 'audio':
-      fn = format => format.hasAudio;
-      break;
-
-    case 'audioonly':
-      fn = format => !format.hasVideo && format.hasAudio;
-      break;
-
-    default:
-      if (typeof filter === 'function') {
-        fn = filter;
-      } else {
-        throw TypeError(`Given filter (${filter}) is not supported`);
-      }
-  }
-  return formats.filter(format => !!format.url && fn(format));
-};
-
-
-/**
- * @param {Object} format
- * @returns {Object}
- */
-exports.addFormatMeta = format => {
-  format = Object.assign({}, FORMATS[format.itag], format);
-  format.hasVideo = !!format.qualityLabel;
-  format.hasAudio = !!format.audioBitrate;
-  format.container = format.mimeType ?
-    format.mimeType.split(';')[0].split('/')[1] : null;
-  format.codecs = format.mimeType ?
-    utils.between(format.mimeType, 'codecs="', '"') : null;
-  format.videoCodec = format.hasVideo && format.codecs ?
-    format.codecs.split(', ')[0] : null;
-  format.audioCodec = format.hasAudio && format.codecs ?
-    format.codecs.split(', ').slice(-1)[0] : null;
-  format.isLive = /\bsource[/=]yt_live_broadcast\b/.test(format.url);
-  format.isHLS = /\/manifest\/hls_(variant|playlist)\//.test(format.url);
-  format.isDashMPD = /\/manifest\/dash\//.test(format.url);
-  return format;
-};
-
-},{"./formats":3,"./utils":9}],3:[function(require,module,exports){
-/**
- * http://en.wikipedia.org/wiki/YouTube#Quality_and_formats
- */
-module.exports = {
-
-  5: {
-    mimeType: 'video/flv; codecs="Sorenson H.283, mp3"',
-    qualityLabel: '240p',
-    bitrate: 250000,
-    audioBitrate: 64,
-  },
-
-  6: {
-    mimeType: 'video/flv; codecs="Sorenson H.263, mp3"',
-    qualityLabel: '270p',
-    bitrate: 800000,
-    audioBitrate: 64,
-  },
-
-  13: {
-    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
-    qualityLabel: null,
-    bitrate: 500000,
-    audioBitrate: null,
-  },
-
-  17: {
-    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
-    qualityLabel: '144p',
-    bitrate: 50000,
-    audioBitrate: 24,
-  },
-
-  18: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '360p',
-    bitrate: 500000,
-    audioBitrate: 96,
-  },
-
-  22: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 2000000,
-    audioBitrate: 192,
-  },
-
-  34: {
-    mimeType: 'video/flv; codecs="H.264, aac"',
-    qualityLabel: '360p',
-    bitrate: 500000,
-    audioBitrate: 128,
-  },
-
-  35: {
-    mimeType: 'video/flv; codecs="H.264, aac"',
-    qualityLabel: '480p',
-    bitrate: 800000,
-    audioBitrate: 128,
-  },
-
-  36: {
-    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
-    qualityLabel: '240p',
-    bitrate: 175000,
-    audioBitrate: 32,
-  },
-
-  37: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '1080p',
-    bitrate: 3000000,
-    audioBitrate: 192,
-  },
-
-  38: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '3072p',
-    bitrate: 3500000,
-    audioBitrate: 192,
-  },
-
-  43: {
-    mimeType: 'video/webm; codecs="VP8, vorbis"',
-    qualityLabel: '360p',
-    bitrate: 500000,
-    audioBitrate: 128,
-  },
-
-  44: {
-    mimeType: 'video/webm; codecs="VP8, vorbis"',
-    qualityLabel: '480p',
-    bitrate: 1000000,
-    audioBitrate: 128,
-  },
-
-  45: {
-    mimeType: 'video/webm; codecs="VP8, vorbis"',
-    qualityLabel: '720p',
-    bitrate: 2000000,
-    audioBitrate: 192,
-  },
-
-  46: {
-    mimeType: 'audio/webm; codecs="vp8, vorbis"',
-    qualityLabel: '1080p',
-    bitrate: null,
-    audioBitrate: 192,
-  },
-
-  82: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '360p',
-    bitrate: 500000,
-    audioBitrate: 96,
-  },
-
-  83: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '240p',
-    bitrate: 500000,
-    audioBitrate: 96,
-  },
-
-  84: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 2000000,
-    audioBitrate: 192,
-  },
-
-  85: {
-    mimeType: 'video/mp4; codecs="H.264, aac"',
-    qualityLabel: '1080p',
-    bitrate: 3000000,
-    audioBitrate: 192,
-  },
-
-  91: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '144p',
-    bitrate: 100000,
-    audioBitrate: 48,
-  },
-
-  92: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '240p',
-    bitrate: 150000,
-    audioBitrate: 48,
-  },
-
-  93: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '360p',
-    bitrate: 500000,
-    audioBitrate: 128,
-  },
-
-  94: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '480p',
-    bitrate: 800000,
-    audioBitrate: 128,
-  },
-
-  95: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 1500000,
-    audioBitrate: 256,
-  },
-
-  96: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '1080p',
-    bitrate: 2500000,
-    audioBitrate: 256,
-  },
-
-  100: {
-    mimeType: 'audio/webm; codecs="VP8, vorbis"',
-    qualityLabel: '360p',
-    bitrate: null,
-    audioBitrate: 128,
-  },
-
-  101: {
-    mimeType: 'audio/webm; codecs="VP8, vorbis"',
-    qualityLabel: '360p',
-    bitrate: null,
-    audioBitrate: 192,
-  },
-
-  102: {
-    mimeType: 'audio/webm; codecs="VP8, vorbis"',
-    qualityLabel: '720p',
-    bitrate: null,
-    audioBitrate: 192,
-  },
-
-  120: {
-    mimeType: 'video/flv; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 2000000,
-    audioBitrate: 128,
-  },
-
-  127: {
-    mimeType: 'audio/ts; codecs="aac"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 96,
-  },
-
-  128: {
-    mimeType: 'audio/ts; codecs="aac"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 96,
-  },
-
-  132: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '240p',
-    bitrate: 150000,
-    audioBitrate: 48,
-  },
-
-  133: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '240p',
-    bitrate: 200000,
-    audioBitrate: null,
-  },
-
-  134: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '360p',
-    bitrate: 300000,
-    audioBitrate: null,
-  },
-
-  135: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '480p',
-    bitrate: 500000,
-    audioBitrate: null,
-  },
-
-  136: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '720p',
-    bitrate: 1000000,
-    audioBitrate: null,
-  },
-
-  137: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '1080p',
-    bitrate: 2500000,
-    audioBitrate: null,
-  },
-
-  138: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '4320p',
-    bitrate: 13500000,
-    audioBitrate: null,
-  },
-
-  139: {
-    mimeType: 'audio/mp4; codecs="aac"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 48,
-  },
-
-  140: {
-    mimeType: 'audio/m4a; codecs="aac"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 128,
-  },
-
-  141: {
-    mimeType: 'audio/mp4; codecs="aac"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 256,
-  },
-
-  151: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 50000,
-    audioBitrate: 24,
-  },
-
-  160: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '144p',
-    bitrate: 100000,
-    audioBitrate: null,
-  },
-
-  171: {
-    mimeType: 'audio/webm; codecs="vorbis"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 128,
-  },
-
-  172: {
-    mimeType: 'audio/webm; codecs="vorbis"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 192,
-  },
-
-  242: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '240p',
-    bitrate: 100000,
-    audioBitrate: null,
-  },
-
-  243: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '360p',
-    bitrate: 250000,
-    audioBitrate: null,
-  },
-
-  244: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '480p',
-    bitrate: 500000,
-    audioBitrate: null,
-  },
-
-  247: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '720p',
-    bitrate: 700000,
-    audioBitrate: null,
-  },
-
-  248: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1080p',
-    bitrate: 1500000,
-    audioBitrate: null,
-  },
-
-  249: {
-    mimeType: 'audio/webm; codecs="opus"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 48,
-  },
-
-  250: {
-    mimeType: 'audio/webm; codecs="opus"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 64,
-  },
-
-  251: {
-    mimeType: 'audio/webm; codecs="opus"',
-    qualityLabel: null,
-    bitrate: null,
-    audioBitrate: 160,
-  },
-
-  264: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '1440p',
-    bitrate: 4000000,
-    audioBitrate: null,
-  },
-
-  266: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '2160p',
-    bitrate: 12500000,
-    audioBitrate: null,
-  },
-
-  271: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1440p',
-    bitrate: 9000000,
-    audioBitrate: null,
-  },
-
-  272: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '4320p',
-    bitrate: 20000000,
-    audioBitrate: null,
-  },
-
-  278: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '144p 30fps',
-    bitrate: 80000,
-    audioBitrate: null,
-  },
-
-  298: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '720p',
-    bitrate: 3000000,
-    audioBitrate: null,
-  },
-
-  299: {
-    mimeType: 'video/mp4; codecs="H.264"',
-    qualityLabel: '1080p',
-    bitrate: 5500000,
-    audioBitrate: null,
-  },
-
-  300: {
-    mimeType: 'video/ts; codecs="H.264, aac"',
-    qualityLabel: '720p',
-    bitrate: 1318000,
-    audioBitrate: 48,
-  },
-
-  302: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '720p HFR',
-    bitrate: 2500000,
-    audioBitrate: null,
-  },
-
-  303: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1080p HFR',
-    bitrate: 5000000,
-    audioBitrate: null,
-  },
-
-  308: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1440p HFR',
-    bitrate: 10000000,
-    audioBitrate: null,
-  },
-
-  313: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '2160p',
-    bitrate: 13000000,
-    audioBitrate: null,
-  },
-
-  315: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '2160p HFR',
-    bitrate: 20000000,
-    audioBitrate: null,
-  },
-
-  330: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '144p HDR, HFR',
-    bitrate: 80000,
-    audioBitrate: null,
-  },
-
-  331: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '240p HDR, HFR',
-    bitrate: 100000,
-    audioBitrate: null,
-  },
-
-  332: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '360p HDR, HFR',
-    bitrate: 250000,
-    audioBitrate: null,
-  },
-
-  333: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '240p HDR, HFR',
-    bitrate: 500000,
-    audioBitrate: null,
-  },
-
-  334: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '720p HDR, HFR',
-    bitrate: 1000000,
-    audioBitrate: null,
-  },
-
-  335: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1080p HDR, HFR',
-    bitrate: 1500000,
-    audioBitrate: null,
-  },
-
-  336: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '1440p HDR, HFR',
-    bitrate: 5000000,
-    audioBitrate: null,
-  },
-
-  337: {
-    mimeType: 'video/webm; codecs="VP9"',
-    qualityLabel: '2160p HDR, HFR',
-    bitrate: 12000000,
-    audioBitrate: null,
-  },
-
-};
-
-},{}],4:[function(require,module,exports){
-(function (setImmediate){(function (){
-const PassThrough = require('stream').PassThrough;
-const getInfo = require('./info');
-const utils = require('./utils');
-const formatUtils = require('./format-utils');
-const urlUtils = require('./url-utils');
-const sig = require('./sig');
-const miniget = require('miniget');
-const m3u8stream = require('m3u8stream');
-const { parseTimestamp } = require('m3u8stream');
-
-
-/**
- * @param {string} link
- * @param {!Object} options
- * @returns {ReadableStream}
- */
-const ytdl = (link, options) => {
-  const stream = createStream(options);
-  ytdl.getInfo(link, options).then(info => {
-    downloadFromInfoCallback(stream, info, options);
-  }, stream.emit.bind(stream, 'error'));
-  return stream;
-};
-module.exports = ytdl;
-
-ytdl.getBasicInfo = getInfo.getBasicInfo;
-ytdl.getInfo = getInfo.getInfo;
-ytdl.chooseFormat = formatUtils.chooseFormat;
-ytdl.filterFormats = formatUtils.filterFormats;
-ytdl.validateID = urlUtils.validateID;
-ytdl.validateURL = urlUtils.validateURL;
-ytdl.getURLVideoID = urlUtils.getURLVideoID;
-ytdl.getVideoID = urlUtils.getVideoID;
-ytdl.cache = {
-  sig: sig.cache,
-  info: getInfo.cache,
-  watch: getInfo.watchPageCache,
-  cookie: getInfo.cookieCache,
-};
-
-
-const createStream = options => {
-  const stream = new PassThrough({
-    highWaterMark: (options && options.highWaterMark) || 1024 * 512,
-  });
-  stream._destroy = () => { stream.destroyed = true; };
-  return stream;
-};
-
-
-const pipeAndSetEvents = (req, stream, end) => {
-  // Forward events from the request to the stream.
-  [
-    'abort', 'request', 'response', 'error', 'redirect', 'retry', 'reconnect',
-  ].forEach(event => {
-    req.prependListener(event, stream.emit.bind(stream, event));
-  });
-  req.pipe(stream, { end });
-};
-
-
-/**
- * Chooses a format to download.
- *
- * @param {stream.Readable} stream
- * @param {Object} info
- * @param {Object} options
- */
-const downloadFromInfoCallback = (stream, info, options) => {
-  options = options || {};
-
-  let err = utils.playError(info.player_response, ['UNPLAYABLE', 'LIVE_STREAM_OFFLINE', 'LOGIN_REQUIRED']);
-  if (err) {
-    stream.emit('error', err);
-    return;
-  }
-
-  if (!info.formats.length) {
-    stream.emit('error', Error('This video is unavailable'));
-    return;
-  }
-
-  let format;
-  try {
-    format = formatUtils.chooseFormat(info.formats, options);
-  } catch (e) {
-    stream.emit('error', e);
-    return;
-  }
-  stream.emit('info', info, format);
-  if (stream.destroyed) { return; }
-
-  let contentLength, downloaded = 0;
-  const ondata = chunk => {
-    downloaded += chunk.length;
-    stream.emit('progress', chunk.length, downloaded, contentLength);
-  };
-
-  // Download the file in chunks, in this case the default is 10MB,
-  // anything over this will cause youtube to throttle the download
-  const dlChunkSize = options.dlChunkSize || 1024 * 1024 * 10;
-  let req;
-  let shouldEnd = true;
-
-  if (format.isHLS || format.isDashMPD) {
-    req = m3u8stream(format.url, {
-      chunkReadahead: +info.live_chunk_readahead,
-      begin: options.begin || (format.isLive && Date.now()),
-      liveBuffer: options.liveBuffer,
-      requestOptions: options.requestOptions,
-      parser: format.isDashMPD ? 'dash-mpd' : 'm3u8',
-      id: format.itag,
-    });
-
-    req.on('progress', (segment, totalSegments) => {
-      stream.emit('progress', segment.size, segment.num, totalSegments);
-    });
-    pipeAndSetEvents(req, stream, shouldEnd);
-  } else {
-    const requestOptions = Object.assign({}, options.requestOptions, {
-      maxReconnects: 6,
-      maxRetries: 3,
-      backoff: { inc: 500, max: 10000 },
-    });
-
-    let shouldBeChunked = dlChunkSize !== 0 && (!format.hasAudio || !format.hasVideo);
-
-    if (shouldBeChunked) {
-      let start = (options.range && options.range.start) || 0;
-      let end = start + dlChunkSize;
-      const rangeEnd = options.range && options.range.end;
-
-      contentLength = options.range ?
-        (rangeEnd ? rangeEnd + 1 : parseInt(format.contentLength)) - start :
-        parseInt(format.contentLength);
-
-      const getNextChunk = () => {
-        if (!rangeEnd && end >= contentLength) end = 0;
-        if (rangeEnd && end > rangeEnd) end = rangeEnd;
-        shouldEnd = !end || end === rangeEnd;
-
-        requestOptions.headers = Object.assign({}, requestOptions.headers, {
-          Range: `bytes=${start}-${end || ''}`,
-        });
-
-        req = miniget(format.url, requestOptions);
-        req.on('data', ondata);
-        req.on('end', () => {
-          if (stream.destroyed) { return; }
-          if (end && end !== rangeEnd) {
-            start = end + 1;
-            end += dlChunkSize;
-            getNextChunk();
-          }
-        });
-        pipeAndSetEvents(req, stream, shouldEnd);
-      };
-      getNextChunk();
-    } else {
-      // Audio only and video only formats don't support begin
-      if (options.begin) {
-        format.url += `&begin=${parseTimestamp(options.begin)}`;
-      }
-      if (options.range && (options.range.start || options.range.end)) {
-        requestOptions.headers = Object.assign({}, requestOptions.headers, {
-          Range: `bytes=${options.range.start || '0'}-${options.range.end || ''}`,
-        });
-      }
-      req = miniget(format.url, requestOptions);
-      req.on('response', res => {
-        if (stream.destroyed) { return; }
-        contentLength = contentLength || parseInt(res.headers['content-length']);
-      });
-      req.on('data', ondata);
-      pipeAndSetEvents(req, stream, shouldEnd);
-    }
-  }
-
-  stream._destroy = () => {
-    stream.destroyed = true;
-    req.destroy();
-    req.end();
-  };
-};
-
-
-/**
- * Can be used to download video after its `info` is gotten through
- * `ytdl.getInfo()`. In case the user might want to look at the
- * `info` object before deciding to download.
- *
- * @param {Object} info
- * @param {!Object} options
- * @returns {ReadableStream}
- */
-ytdl.downloadFromInfo = (info, options) => {
-  const stream = createStream(options);
-  if (!info.full) {
-    throw Error('Cannot use `ytdl.downloadFromInfo()` when called ' +
-      'with info from `ytdl.getBasicInfo()`');
-  }
-  setImmediate(() => {
-    downloadFromInfoCallback(stream, info, options);
-  });
-  return stream;
-};
-
-}).call(this)}).call(this,require("timers").setImmediate)
-},{"./format-utils":2,"./info":6,"./sig":7,"./url-utils":8,"./utils":9,"m3u8stream":12,"miniget":18,"stream":34,"timers":70}],5:[function(require,module,exports){
-const utils = require('./utils');
-const { URL } = require('./url-utils');
-const qs = require('querystring');
-const { parseTimestamp } = require('m3u8stream');
-
-
-const BASE_URL = 'https://www.youtube.com/watch?v=';
-const TITLE_TO_CATEGORY = {
-  song: { name: 'Music', url: 'https://music.youtube.com/' },
-};
-
-const getText = obj => obj ? obj.runs ? obj.runs[0].text : obj.simpleText : null;
-
-
-/**
- * Get video media.
- *
- * @param {Object} info
- * @returns {Object}
- */
-exports.getMedia = info => {
-  let media = {};
-  let results = [];
-  try {
-    results = info.response.contents.twoColumnWatchNextResults.results.results.contents;
-  } catch (err) {
-    // Do nothing
-  }
-
-  let result = results.find(v => v.videoSecondaryInfoRenderer);
-  if (!result) { return {}; }
-
-  try {
-    let metadataRows =
-      (result.metadataRowContainer || result.videoSecondaryInfoRenderer.metadataRowContainer)
-        .metadataRowContainerRenderer.rows;
-    for (let row of metadataRows) {
-      if (row.metadataRowRenderer) {
-        let title = getText(row.metadataRowRenderer.title).toLowerCase();
-        let contents = row.metadataRowRenderer.contents[0];
-        media[title] = getText(contents);
-        let runs = contents.runs;
-        if (runs && runs[0].navigationEndpoint) {
-          media[`${title}_url`] = new URL(
-            runs[0].navigationEndpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
-        }
-        if (title in TITLE_TO_CATEGORY) {
-          media.category = TITLE_TO_CATEGORY[title].name;
-          media.category_url = TITLE_TO_CATEGORY[title].url;
-        }
-      } else if (row.richMetadataRowRenderer) {
-        let contents = row.richMetadataRowRenderer.contents;
-        let boxArt = contents
-          .filter(meta => meta.richMetadataRenderer.style === 'RICH_METADATA_RENDERER_STYLE_BOX_ART');
-        for (let { richMetadataRenderer } of boxArt) {
-          let meta = richMetadataRenderer;
-          media.year = getText(meta.subtitle);
-          let type = getText(meta.callToAction).split(' ')[1];
-          media[type] = getText(meta.title);
-          media[`${type}_url`] = new URL(
-            meta.endpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
-          media.thumbnails = meta.thumbnail.thumbnails;
-        }
-        let topic = contents
-          .filter(meta => meta.richMetadataRenderer.style === 'RICH_METADATA_RENDERER_STYLE_TOPIC');
-        for (let { richMetadataRenderer } of topic) {
-          let meta = richMetadataRenderer;
-          media.category = getText(meta.title);
-          media.category_url = new URL(
-            meta.endpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
-        }
-      }
-    }
-  } catch (err) {
-    // Do nothing.
-  }
-
-  return media;
-};
-
-
-const isVerified = badges => !!(badges && badges.find(b => b.metadataBadgeRenderer.tooltip === 'Verified'));
-
-
-/**
- * Get video author.
- *
- * @param {Object} info
- * @returns {Object}
- */
-exports.getAuthor = info => {
-  let channelId, thumbnails = [], subscriberCount, verified = false;
-  try {
-    let results = info.response.contents.twoColumnWatchNextResults.results.results.contents;
-    let v = results.find(v2 =>
-      v2.videoSecondaryInfoRenderer &&
-      v2.videoSecondaryInfoRenderer.owner &&
-      v2.videoSecondaryInfoRenderer.owner.videoOwnerRenderer);
-    let videoOwnerRenderer = v.videoSecondaryInfoRenderer.owner.videoOwnerRenderer;
-    channelId = videoOwnerRenderer.navigationEndpoint.browseEndpoint.browseId;
-    thumbnails = videoOwnerRenderer.thumbnail.thumbnails.map(thumbnail => {
-      thumbnail.url = new URL(thumbnail.url, BASE_URL).toString();
-      return thumbnail;
-    });
-    subscriberCount = utils.parseAbbreviatedNumber(getText(videoOwnerRenderer.subscriberCountText));
-    verified = isVerified(videoOwnerRenderer.badges);
-  } catch (err) {
-    // Do nothing.
-  }
-  try {
-    let videoDetails = info.player_response.microformat && info.player_response.microformat.playerMicroformatRenderer;
-    let id = (videoDetails && videoDetails.channelId) || channelId || info.player_response.videoDetails.channelId;
-    let author = {
-      id: id,
-      name: videoDetails ? videoDetails.ownerChannelName : info.player_response.videoDetails.author,
-      user: videoDetails ? videoDetails.ownerProfileUrl.split('/').slice(-1)[0] : null,
-      channel_url: `https://www.youtube.com/channel/${id}`,
-      external_channel_url: videoDetails ? `https://www.youtube.com/channel/${videoDetails.externalChannelId}` : '',
-      user_url: videoDetails ? new URL(videoDetails.ownerProfileUrl, BASE_URL).toString() : '',
-      thumbnails,
-      verified,
-      subscriber_count: subscriberCount,
-    };
-    if (thumbnails.length) {
-      utils.deprecate(author, 'avatar', author.thumbnails[0].url, 'author.avatar', 'author.thumbnails[0].url');
-    }
-    return author;
-  } catch (err) {
-    return {};
-  }
-};
-
-const parseRelatedVideo = (details, rvsParams) => {
-  if (!details) return;
-  try {
-    let viewCount = getText(details.viewCountText);
-    let shortViewCount = getText(details.shortViewCountText);
-    let rvsDetails = rvsParams.find(elem => elem.id === details.videoId);
-    if (!/^\d/.test(shortViewCount)) {
-      shortViewCount = (rvsDetails && rvsDetails.short_view_count_text) || '';
-    }
-    viewCount = (/^\d/.test(viewCount) ? viewCount : shortViewCount).split(' ')[0];
-    let browseEndpoint = details.shortBylineText.runs[0].navigationEndpoint.browseEndpoint;
-    let channelId = browseEndpoint.browseId;
-    let name = getText(details.shortBylineText);
-    let user = (browseEndpoint.canonicalBaseUrl || '').split('/').slice(-1)[0];
-    let video = {
-      id: details.videoId,
-      title: getText(details.title),
-      published: getText(details.publishedTimeText),
-      author: {
-        id: channelId,
-        name,
-        user,
-        channel_url: `https://www.youtube.com/channel/${channelId}`,
-        user_url: `https://www.youtube.com/user/${user}`,
-        thumbnails: details.channelThumbnail.thumbnails.map(thumbnail => {
-          thumbnail.url = new URL(thumbnail.url, BASE_URL).toString();
-          return thumbnail;
-        }),
-        verified: isVerified(details.ownerBadges),
-
-        [Symbol.toPrimitive]() {
-          console.warn(`\`relatedVideo.author\` will be removed in a near future release, ` +
-            `use \`relatedVideo.author.name\` instead.`);
-          return video.author.name;
-        },
-
-      },
-      short_view_count_text: shortViewCount.split(' ')[0],
-      view_count: viewCount.replace(/,/g, ''),
-      length_seconds: details.lengthText ?
-        Math.floor(parseTimestamp(getText(details.lengthText)) / 1000) :
-        rvsParams && `${rvsParams.length_seconds}`,
-      thumbnails: details.thumbnail.thumbnails,
-      richThumbnails:
-        details.richThumbnail ?
-          details.richThumbnail.movingThumbnailRenderer.movingThumbnailDetails.thumbnails : [],
-      isLive: !!(details.badges && details.badges.find(b => b.metadataBadgeRenderer.label === 'LIVE NOW')),
-    };
-
-    utils.deprecate(video, 'author_thumbnail', video.author.thumbnails[0].url,
-      'relatedVideo.author_thumbnail', 'relatedVideo.author.thumbnails[0].url');
-    utils.deprecate(video, 'ucid', video.author.id, 'relatedVideo.ucid', 'relatedVideo.author.id');
-    utils.deprecate(video, 'video_thumbnail', video.thumbnails[0].url,
-      'relatedVideo.video_thumbnail', 'relatedVideo.thumbnails[0].url');
-    return video;
-  } catch (err) {
-    // Skip.
-  }
-};
-
-/**
- * Get related videos.
- *
- * @param {Object} info
- * @returns {Array.<Object>}
- */
-exports.getRelatedVideos = info => {
-  let rvsParams = [], secondaryResults = [];
-  try {
-    rvsParams = info.response.webWatchNextResponseExtensionData.relatedVideoArgs.split(',').map(e => qs.parse(e));
-  } catch (err) {
-    // Do nothing.
-  }
-  try {
-    secondaryResults = info.response.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results;
-  } catch (err) {
-    return [];
-  }
-  let videos = [];
-  for (let result of secondaryResults || []) {
-    let details = result.compactVideoRenderer;
-    if (details) {
-      let video = parseRelatedVideo(details, rvsParams);
-      if (video) videos.push(video);
-    } else {
-      let autoplay = result.compactAutoplayRenderer || result.itemSectionRenderer;
-      if (!autoplay || !Array.isArray(autoplay.contents)) continue;
-      for (let content of autoplay.contents) {
-        let video = parseRelatedVideo(content.compactVideoRenderer, rvsParams);
-        if (video) videos.push(video);
-      }
-    }
-  }
-  return videos;
-};
-
-/**
- * Get like count.
- *
- * @param {Object} info
- * @returns {number}
- */
-exports.getLikes = info => {
-  try {
-    let contents = info.response.contents.twoColumnWatchNextResults.results.results.contents;
-    let video = contents.find(r => r.videoPrimaryInfoRenderer);
-    let buttons = video.videoPrimaryInfoRenderer.videoActions.menuRenderer.topLevelButtons;
-    let like = buttons.find(b => b.toggleButtonRenderer &&
-      b.toggleButtonRenderer.defaultIcon.iconType === 'LIKE');
-    return parseInt(like.toggleButtonRenderer.defaultText.accessibility.accessibilityData.label.replace(/\D+/g, ''));
-  } catch (err) {
-    return null;
-  }
-};
-
-/**
- * Get dislike count.
- *
- * @param {Object} info
- * @returns {number}
- */
-exports.getDislikes = info => {
-  try {
-    let contents = info.response.contents.twoColumnWatchNextResults.results.results.contents;
-    let video = contents.find(r => r.videoPrimaryInfoRenderer);
-    let buttons = video.videoPrimaryInfoRenderer.videoActions.menuRenderer.topLevelButtons;
-    let dislike = buttons.find(b => b.toggleButtonRenderer &&
-      b.toggleButtonRenderer.defaultIcon.iconType === 'DISLIKE');
-    return parseInt(dislike.toggleButtonRenderer.defaultText.accessibility.accessibilityData.label.replace(/\D+/g, ''));
-  } catch (err) {
-    return null;
-  }
-};
-
-/**
- * Cleans up a few fields on `videoDetails`.
- *
- * @param {Object} videoDetails
- * @param {Object} info
- * @returns {Object}
- */
-exports.cleanVideoDetails = (videoDetails, info) => {
-  videoDetails.thumbnails = videoDetails.thumbnail.thumbnails;
-  delete videoDetails.thumbnail;
-  utils.deprecate(videoDetails, 'thumbnail', { thumbnails: videoDetails.thumbnails },
-    'videoDetails.thumbnail.thumbnails', 'videoDetails.thumbnails');
-  videoDetails.description = videoDetails.shortDescription || getText(videoDetails.description);
-  delete videoDetails.shortDescription;
-  utils.deprecate(videoDetails, 'shortDescription', videoDetails.description,
-    'videoDetails.shortDescription', 'videoDetails.description');
-
-  // Use more reliable `lengthSeconds` from `playerMicroformatRenderer`.
-  videoDetails.lengthSeconds =
-    info.player_response.microformat &&
-    info.player_response.microformat.playerMicroformatRenderer.lengthSeconds;
-  return videoDetails;
-};
-
-/**
- * Get storyboards info.
- *
- * @param {Object} info
- * @returns {Array.<Object>}
- */
-exports.getStoryboards = info => {
-  const parts = info.player_response.storyboards &&
-    info.player_response.storyboards.playerStoryboardSpecRenderer &&
-    info.player_response.storyboards.playerStoryboardSpecRenderer.spec &&
-    info.player_response.storyboards.playerStoryboardSpecRenderer.spec.split('|');
-
-  if (!parts) return [];
-
-  const url = new URL(parts.shift());
-
-  return parts.map((part, i) => {
-    let [
-      thumbnailWidth,
-      thumbnailHeight,
-      thumbnailCount,
-      columns,
-      rows,
-      interval,
-      nameReplacement,
-      sigh,
-    ] = part.split('#');
-
-    url.searchParams.set('sigh', sigh);
-
-    thumbnailCount = parseInt(thumbnailCount, 10);
-    columns = parseInt(columns, 10);
-    rows = parseInt(rows, 10);
-
-    const storyboardCount = Math.ceil(thumbnailCount / (columns * rows));
-
-    return {
-      templateUrl: url.toString().replace('$L', i).replace('$N', nameReplacement),
-      thumbnailWidth: parseInt(thumbnailWidth, 10),
-      thumbnailHeight: parseInt(thumbnailHeight, 10),
-      thumbnailCount,
-      interval: parseInt(interval, 10),
-      columns,
-      rows,
-      storyboardCount,
-    };
-  });
-};
-
-},{"./url-utils":8,"./utils":9,"m3u8stream":12,"querystring":31}],6:[function(require,module,exports){
-const querystring = require('querystring');
-const sax = require('sax');
-const miniget = require('miniget');
-const utils = require('./utils');
-const { URL } = require('./url-utils');
-// Forces Node JS version of setTimeout for Electron based applications
-const { setTimeout } = require('timers');
-const formatUtils = require('./format-utils');
-const urlUtils = require('./url-utils');
-const extras = require('./info-extras');
-const sig = require('./sig');
-const Cache = require('./cache');
-
-
-const BASE_URL = 'https://www.youtube.com/watch?v=';
-
-
-// Cached for storing basic/full info.
-exports.cache = new Cache();
-exports.cookieCache = new Cache(1000 * 60 * 60 * 24);
-exports.watchPageCache = new Cache();
-
-
-// Special error class used to determine if an error is unrecoverable,
-// as in, ytdl-core should not try again to fetch the video metadata.
-// In this case, the video is usually unavailable in some way.
-class UnrecoverableError extends Error {}
-
-
-// List of URLs that show up in `notice_url` for age restricted videos.
-const AGE_RESTRICTED_URLS = [
-  'support.google.com/youtube/?p=age_restrictions',
-  'youtube.com/t/community_guidelines',
-];
-
-
-/**
- * Gets info from a video without getting additional formats.
- *
- * @param {string} id
- * @param {Object} options
- * @returns {Promise<Object>}
-*/
-exports.getBasicInfo = async(id, options) => {
-  const retryOptions = Object.assign({}, miniget.defaultOptions, options.requestOptions);
-  options.requestOptions = Object.assign({}, options.requestOptions, {});
-  options.requestOptions.headers = Object.assign({},
-    {
-      // eslint-disable-next-line max-len
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36',
-    }, options.requestOptions.headers);
-  const validate = info => {
-    let playErr = utils.playError(info.player_response, ['ERROR'], UnrecoverableError);
-    let privateErr = privateVideoError(info.player_response);
-    if (playErr || privateErr) {
-      throw playErr || privateErr;
-    }
-    return info && info.player_response && (
-      info.player_response.streamingData || isRental(info.player_response) || isNotYetBroadcasted(info.player_response)
-    );
-  };
-  let info = await pipeline([id, options], validate, retryOptions, [
-    getWatchHTMLPage,
-    getWatchJSONPage,
-    getVideoInfoPage,
-  ]);
-
-  Object.assign(info, {
-    formats: parseFormats(info.player_response),
-    related_videos: extras.getRelatedVideos(info),
-  });
-
-  // Add additional properties to info.
-  const media = extras.getMedia(info);
-  let additional = {
-    author: extras.getAuthor(info),
-    media,
-    likes: extras.getLikes(info),
-    dislikes: extras.getDislikes(info),
-    age_restricted: !!(media && media.notice_url && AGE_RESTRICTED_URLS.some(url => media.notice_url.includes(url))),
-
-    // Give the standard link to the video.
-    video_url: BASE_URL + id,
-    storyboards: extras.getStoryboards(info),
-  };
-
-  info.videoDetails = extras.cleanVideoDetails(Object.assign({},
-    info.player_response && info.player_response.microformat &&
-    info.player_response.microformat.playerMicroformatRenderer,
-    info.player_response && info.player_response.videoDetails, additional), info);
-
-  return info;
-};
-
-const privateVideoError = player_response => {
-  let playability = player_response && player_response.playabilityStatus;
-  if (playability && playability.status === 'LOGIN_REQUIRED' && playability.messages &&
-    playability.messages.filter(m => /This is a private video/.test(m)).length) {
-    return new UnrecoverableError(playability.reason || (playability.messages && playability.messages[0]));
-  } else {
-    return null;
-  }
-};
-
-
-const isRental = player_response => {
-  let playability = player_response.playabilityStatus;
-  return playability && playability.status === 'UNPLAYABLE' &&
-    playability.errorScreen && playability.errorScreen.playerLegacyDesktopYpcOfferRenderer;
-};
-
-
-const isNotYetBroadcasted = player_response => {
-  let playability = player_response.playabilityStatus;
-  return playability && playability.status === 'LIVE_STREAM_OFFLINE';
-};
-
-
-const getWatchHTMLURL = (id, options) => `${BASE_URL + id}&hl=${options.lang || 'en'}`;
-const getWatchHTMLPageBody = (id, options) => {
-  const url = getWatchHTMLURL(id, options);
-  return exports.watchPageCache.getOrSet(url, () => miniget(url, options.requestOptions).text());
-};
-
-
-const EMBED_URL = 'https://www.youtube.com/embed/';
-const getEmbedPageBody = (id, options) => {
-  const embedUrl = `${EMBED_URL + id}?hl=${options.lang || 'en'}`;
-  return miniget(embedUrl, options.requestOptions).text();
-};
-
-
-const getHTML5player = body => {
-  let html5playerRes =
-    /<script\s+src="([^"]+)"(?:\s+type="text\/javascript")?\s+name="player_ias\/base"\s*>|"jsUrl":"([^"]+)"/
-      .exec(body);
-  return html5playerRes ? html5playerRes[1] || html5playerRes[2] : null;
-};
-
-
-const getIdentityToken = (id, options, key, throwIfNotFound) =>
-  exports.cookieCache.getOrSet(key, async() => {
-    let page = await getWatchHTMLPageBody(id, options);
-    let match = page.match(/(["'])ID_TOKEN\1[:,]\s?"([^"]+)"/);
-    if (!match && throwIfNotFound) {
-      throw new UnrecoverableError('Cookie header used in request, but unable to find YouTube identity token');
-    }
-    return match && match[2];
-  });
-
-
-/**
- * Goes through each endpoint in the pipeline, retrying on failure if the error is recoverable.
- * If unable to succeed with one endpoint, moves onto the next one.
- *
- * @param {Array.<Object>} args
- * @param {Function} validate
- * @param {Object} retryOptions
- * @param {Array.<Function>} endpoints
- * @returns {[Object, Object, Object]}
- */
-const pipeline = async(args, validate, retryOptions, endpoints) => {
-  let info;
-  for (let func of endpoints) {
-    try {
-      const newInfo = await retryFunc(func, args.concat([info]), retryOptions);
-      if (newInfo.player_response) {
-        newInfo.player_response.videoDetails = assign(
-          info && info.player_response && info.player_response.videoDetails,
-          newInfo.player_response.videoDetails);
-        newInfo.player_response = assign(info && info.player_response, newInfo.player_response);
-      }
-      info = assign(info, newInfo);
-      if (validate(info, false)) {
-        break;
-      }
-    } catch (err) {
-      if (err instanceof UnrecoverableError || func === endpoints[endpoints.length - 1]) {
-        throw err;
-      }
-      // Unable to find video metadata... so try next endpoint.
-    }
-  }
-  return info;
-};
-
-
-/**
- * Like Object.assign(), but ignores `null` and `undefined` from `source`.
- *
- * @param {Object} target
- * @param {Object} source
- * @returns {Object}
- */
-const assign = (target, source) => {
-  if (!target || !source) { return target || source; }
-  for (let [key, value] of Object.entries(source)) {
-    if (value !== null && value !== undefined) {
-      target[key] = value;
-    }
-  }
-  return target;
-};
-
-
-/**
- * Given a function, calls it with `args` until it's successful,
- * or until it encounters an unrecoverable error.
- * Currently, any error from miniget is considered unrecoverable. Errors such as
- * too many redirects, invalid URL, status code 404, status code 502.
- *
- * @param {Function} func
- * @param {Array.<Object>} args
- * @param {Object} options
- * @param {number} options.maxRetries
- * @param {Object} options.backoff
- * @param {number} options.backoff.inc
- */
-const retryFunc = async(func, args, options) => {
-  let currentTry = 0, result;
-  while (currentTry <= options.maxRetries) {
-    try {
-      result = await func(...args);
-      break;
-    } catch (err) {
-      if (err instanceof UnrecoverableError ||
-        (err instanceof miniget.MinigetError && err.statusCode < 500) || currentTry >= options.maxRetries) {
-        throw err;
-      }
-      let wait = Math.min(++currentTry * options.backoff.inc, options.backoff.max);
-      await new Promise(resolve => setTimeout(resolve, wait));
-    }
-  }
-  return result;
-};
-
-
-const jsonClosingChars = /^[)\]}'\s]+/;
-const parseJSON = (source, varName, json) => {
-  if (!json || typeof json === 'object') {
-    return json;
-  } else {
-    try {
-      json = json.replace(jsonClosingChars, '');
-      return JSON.parse(json);
-    } catch (err) {
-      throw Error(`Error parsing ${varName} in ${source}: ${err.message}`);
-    }
-  }
-};
-
-
-const findJSON = (source, varName, body, left, right, prependJSON) => {
-  let jsonStr = utils.between(body, left, right);
-  if (!jsonStr) {
-    throw Error(`Could not find ${varName} in ${source}`);
-  }
-  return parseJSON(source, varName, utils.cutAfterJSON(`${prependJSON}${jsonStr}`));
-};
-
-
-const findPlayerResponse = (source, info) => {
-  const player_response = info && (
-    (info.args && info.args.player_response) ||
-    info.player_response || info.playerResponse || info.embedded_player_response);
-  return parseJSON(source, 'player_response', player_response);
-};
-
-
-const getWatchJSONURL = (id, options) => `${getWatchHTMLURL(id, options)}&pbj=1`;
-const getWatchJSONPage = async(id, options) => {
-  const reqOptions = Object.assign({ headers: {} }, options.requestOptions);
-  let cookie = reqOptions.headers.Cookie || reqOptions.headers.cookie;
-  reqOptions.headers = Object.assign({
-    'x-youtube-client-name': '1',
-    'x-youtube-client-version': '2.20201203.06.00',
-    'x-youtube-identity-token': exports.cookieCache.get(cookie || 'browser') || '',
-  }, reqOptions.headers);
-
-  const setIdentityToken = async(key, throwIfNotFound) => {
-    if (reqOptions.headers['x-youtube-identity-token']) { return; }
-    reqOptions.headers['x-youtube-identity-token'] = await getIdentityToken(id, options, key, throwIfNotFound);
-  };
-
-  if (cookie) {
-    await setIdentityToken(cookie, true);
-  }
-
-  const jsonUrl = getWatchJSONURL(id, options);
-  let body = await miniget(jsonUrl, reqOptions).text();
-  let parsedBody = parseJSON('watch.json', 'body', body);
-  if (parsedBody.reload === 'now') {
-    await setIdentityToken('browser', false);
-  }
-  if (parsedBody.reload === 'now' || !Array.isArray(parsedBody)) {
-    throw Error('Unable to retrieve video metadata in watch.json');
-  }
-  let info = parsedBody.reduce((part, curr) => Object.assign(curr, part), {});
-  info.player_response = findPlayerResponse('watch.json', info);
-  info.html5player = info.player && info.player.assets && info.player.assets.js;
-
-  return info;
-};
-
-
-const getWatchHTMLPage = async(id, options) => {
-  let body = await getWatchHTMLPageBody(id, options);
-  let info = { page: 'watch' };
-  try {
-    info.player_response = findJSON('watch.html', 'player_response',
-      body, /\bytInitialPlayerResponse\s*=\s*\{/i, '\n', '{');
-  } catch (err) {
-    let args = findJSON('watch.html', 'player_response', body, /\bytplayer\.config\s*=\s*{/, '</script>', '{');
-    info.player_response = findPlayerResponse('watch.html', args);
-  }
-  info.response = findJSON('watch.html', 'response', body, /\bytInitialData("\])?\s*=\s*\{/i, '\n', '{');
-  info.html5player = getHTML5player(body);
-  return info;
-};
-
-
-const INFO_HOST = 'www.youtube.com';
-const INFO_PATH = '/get_video_info';
-const VIDEO_EURL = 'https://youtube.googleapis.com/v/';
-const getVideoInfoPage = async(id, options) => {
-  const url = new URL(`https://${INFO_HOST}${INFO_PATH}`);
-  url.searchParams.set('video_id', id);
-  url.searchParams.set('eurl', VIDEO_EURL + id);
-  url.searchParams.set('ps', 'default');
-  url.searchParams.set('gl', 'US');
-  url.searchParams.set('hl', options.lang || 'en');
-  let body = await miniget(url.toString(), options.requestOptions).text();
-  let info = querystring.parse(body);
-  info.player_response = findPlayerResponse('get_video_info', info);
-  return info;
-};
-
-
-/**
- * @param {Object} player_response
- * @returns {Array.<Object>}
- */
-const parseFormats = player_response => {
-  let formats = [];
-  if (player_response && player_response.streamingData) {
-    formats = formats
-      .concat(player_response.streamingData.formats || [])
-      .concat(player_response.streamingData.adaptiveFormats || []);
-  }
-  return formats;
-};
-
-
-/**
- * Gets info from a video additional formats and deciphered URLs.
- *
- * @param {string} id
- * @param {Object} options
- * @returns {Promise<Object>}
- */
-exports.getInfo = async(id, options) => {
-  let info = await exports.getBasicInfo(id, options);
-  const hasManifest =
-    info.player_response && info.player_response.streamingData && (
-      info.player_response.streamingData.dashManifestUrl ||
-      info.player_response.streamingData.hlsManifestUrl
-    );
-  let funcs = [];
-  if (info.formats.length) {
-    info.html5player = info.html5player ||
-      getHTML5player(await getWatchHTMLPageBody(id, options)) || getHTML5player(await getEmbedPageBody(id, options));
-    if (!info.html5player) {
-      throw Error('Unable to find html5player file');
-    }
-    const html5player = new URL(info.html5player, BASE_URL).toString();
-    funcs.push(sig.decipherFormats(info.formats, html5player, options));
-  }
-  if (hasManifest && info.player_response.streamingData.dashManifestUrl) {
-    let url = info.player_response.streamingData.dashManifestUrl;
-    funcs.push(getDashManifest(url, options));
-  }
-  if (hasManifest && info.player_response.streamingData.hlsManifestUrl) {
-    let url = info.player_response.streamingData.hlsManifestUrl;
-    funcs.push(getM3U8(url, options));
-  }
-
-  let results = await Promise.all(funcs);
-  info.formats = Object.values(Object.assign({}, ...results));
-  info.formats = info.formats.map(formatUtils.addFormatMeta);
-  info.formats.sort(formatUtils.sortFormats);
-  info.full = true;
-  return info;
-};
-
-
-/**
- * Gets additional DASH formats.
- *
- * @param {string} url
- * @param {Object} options
- * @returns {Promise<Array.<Object>>}
- */
-const getDashManifest = (url, options) => new Promise((resolve, reject) => {
-  let formats = {};
-  const parser = sax.parser(false);
-  parser.onerror = reject;
-  let adaptationSet;
-  parser.onopentag = node => {
-    if (node.name === 'ADAPTATIONSET') {
-      adaptationSet = node.attributes;
-    } else if (node.name === 'REPRESENTATION') {
-      const itag = parseInt(node.attributes.ID);
-      if (!isNaN(itag)) {
-        formats[url] = Object.assign({
-          itag, url,
-          bitrate: parseInt(node.attributes.BANDWIDTH),
-          mimeType: `${adaptationSet.MIMETYPE}; codecs="${node.attributes.CODECS}"`,
-        }, node.attributes.HEIGHT ? {
-          width: parseInt(node.attributes.WIDTH),
-          height: parseInt(node.attributes.HEIGHT),
-          fps: parseInt(node.attributes.FRAMERATE),
-        } : {
-          audioSampleRate: node.attributes.AUDIOSAMPLINGRATE,
-        });
-      }
-    }
-  };
-  parser.onend = () => { resolve(formats); };
-  const req = miniget(new URL(url, BASE_URL).toString(), options.requestOptions);
-  req.setEncoding('utf8');
-  req.on('error', reject);
-  req.on('data', chunk => { parser.write(chunk); });
-  req.on('end', parser.close.bind(parser));
-});
-
-
-/**
- * Gets additional formats.
- *
- * @param {string} url
- * @param {Object} options
- * @returns {Promise<Array.<Object>>}
- */
-const getM3U8 = async(url, options) => {
-  url = new URL(url, BASE_URL);
-  let body = await miniget(url.toString(), options.requestOptions).text();
-  let formats = {};
-  body
-    .split('\n')
-    .filter(line => /^https?:\/\//.test(line))
-    .forEach(line => {
-      const itag = parseInt(line.match(/\/itag\/(\d+)\//)[1]);
-      formats[line] = { itag, url: line };
-    });
-  return formats;
-};
-
-
-// Cache get info functions.
-// In case a user wants to get a video's info before downloading.
-for (let funcName of ['getBasicInfo', 'getInfo']) {
-  /**
-   * @param {string} link
-   * @param {Object} options
-   * @returns {Promise<Object>}
-   */
-  const func = exports[funcName];
-  exports[funcName] = async(link, options = {}) => {
-    utils.checkForUpdates();
-    let id = await urlUtils.getVideoID(link);
-    const key = [funcName, id, options.lang].join('-');
-    return exports.cache.getOrSet(key, () => func(id, options));
-  };
-}
-
-
-// Export a few helpers.
-exports.validateID = urlUtils.validateID;
-exports.validateURL = urlUtils.validateURL;
-exports.getURLVideoID = urlUtils.getURLVideoID;
-exports.getVideoID = urlUtils.getVideoID;
-
-},{"./cache":1,"./format-utils":2,"./info-extras":5,"./sig":7,"./url-utils":8,"./utils":9,"miniget":18,"querystring":31,"sax":33,"timers":70}],7:[function(require,module,exports){
-const { URL } = require('./url-utils');
-const miniget = require('miniget');
-const querystring = require('querystring');
-const Cache = require('./cache');
-
-
-// A shared cache to keep track of html5player.js tokens.
-exports.cache = new Cache();
-
-
-/**
- * Extract signature deciphering tokens from html5player file.
- *
- * @param {string} html5playerfile
- * @param {Object} options
- * @returns {Promise<Array.<string>>}
- */
-exports.getTokens = (html5playerfile, options) => exports.cache.getOrSet(html5playerfile, async() => {
-  let body = await miniget(html5playerfile, options.requestOptions).text();
-  const tokens = exports.extractActions(body);
-  if (!tokens || !tokens.length) {
-    throw Error('Could not extract signature deciphering actions');
-  }
-  exports.cache.set(html5playerfile, tokens);
-  return tokens;
-});
-
-
-/**
- * Decipher a signature based on action tokens.
- *
- * @param {Array.<string>} tokens
- * @param {string} sig
- * @returns {string}
- */
-exports.decipher = (tokens, sig) => {
-  sig = sig.split('');
-  for (let i = 0, len = tokens.length; i < len; i++) {
-    let token = tokens[i], pos;
-    switch (token[0]) {
-      case 'r':
-        sig = sig.reverse();
-        break;
-      case 'w':
-        pos = ~~token.slice(1);
-        sig = swapHeadAndPosition(sig, pos);
-        break;
-      case 's':
-        pos = ~~token.slice(1);
-        sig = sig.slice(pos);
-        break;
-      case 'p':
-        pos = ~~token.slice(1);
-        sig.splice(0, pos);
-        break;
-    }
-  }
-  return sig.join('');
-};
-
-
-/**
- * Swaps the first element of an array with one of given position.
- *
- * @param {Array.<Object>} arr
- * @param {number} position
- * @returns {Array.<Object>}
- */
-const swapHeadAndPosition = (arr, position) => {
-  const first = arr[0];
-  arr[0] = arr[position % arr.length];
-  arr[position] = first;
-  return arr;
-};
-
-
-const jsVarStr = '[a-zA-Z_\\$][a-zA-Z_0-9]*';
-const jsSingleQuoteStr = `'[^'\\\\]*(:?\\\\[\\s\\S][^'\\\\]*)*'`;
-const jsDoubleQuoteStr = `"[^"\\\\]*(:?\\\\[\\s\\S][^"\\\\]*)*"`;
-const jsQuoteStr = `(?:${jsSingleQuoteStr}|${jsDoubleQuoteStr})`;
-const jsKeyStr = `(?:${jsVarStr}|${jsQuoteStr})`;
-const jsPropStr = `(?:\\.${jsVarStr}|\\[${jsQuoteStr}\\])`;
-const jsEmptyStr = `(?:''|"")`;
-const reverseStr = ':function\\(a\\)\\{' +
-  '(?:return )?a\\.reverse\\(\\)' +
-'\\}';
-const sliceStr = ':function\\(a,b\\)\\{' +
-  'return a\\.slice\\(b\\)' +
-'\\}';
-const spliceStr = ':function\\(a,b\\)\\{' +
-  'a\\.splice\\(0,b\\)' +
-'\\}';
-const swapStr = ':function\\(a,b\\)\\{' +
-  'var c=a\\[0\\];a\\[0\\]=a\\[b(?:%a\\.length)?\\];a\\[b(?:%a\\.length)?\\]=c(?:;return a)?' +
-'\\}';
-const actionsObjRegexp = new RegExp(
-  `var (${jsVarStr})=\\{((?:(?:${
-    jsKeyStr}${reverseStr}|${
-    jsKeyStr}${sliceStr}|${
-    jsKeyStr}${spliceStr}|${
-    jsKeyStr}${swapStr
-  }),?\\r?\\n?)+)\\};`);
-const actionsFuncRegexp = new RegExp(`${`function(?: ${jsVarStr})?\\(a\\)\\{` +
-    `a=a\\.split\\(${jsEmptyStr}\\);\\s*` +
-    `((?:(?:a=)?${jsVarStr}`}${
-  jsPropStr
-}\\(a,\\d+\\);)+)` +
-    `return a\\.join\\(${jsEmptyStr}\\)` +
-  `\\}`);
-const reverseRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${reverseStr}`, 'm');
-const sliceRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${sliceStr}`, 'm');
-const spliceRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${spliceStr}`, 'm');
-const swapRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${swapStr}`, 'm');
-
-
-/**
- * Extracts the actions that should be taken to decipher a signature.
- *
- * This searches for a function that performs string manipulations on
- * the signature. We already know what the 3 possible changes to a signature
- * are in order to decipher it. There is
- *
- * * Reversing the string.
- * * Removing a number of characters from the beginning.
- * * Swapping the first character with another position.
- *
- * Note, `Array#slice()` used to be used instead of `Array#splice()`,
- * it's kept in case we encounter any older html5player files.
- *
- * After retrieving the function that does this, we can see what actions
- * it takes on a signature.
- *
- * @param {string} body
- * @returns {Array.<string>}
- */
-exports.extractActions = body => {
-  const objResult = actionsObjRegexp.exec(body);
-  const funcResult = actionsFuncRegexp.exec(body);
-  if (!objResult || !funcResult) { return null; }
-
-  const obj = objResult[1].replace(/\$/g, '\\$');
-  const objBody = objResult[2].replace(/\$/g, '\\$');
-  const funcBody = funcResult[1].replace(/\$/g, '\\$');
-
-  let result = reverseRegexp.exec(objBody);
-  const reverseKey = result && result[1]
-    .replace(/\$/g, '\\$')
-    .replace(/\$|^'|^"|'$|"$/g, '');
-  result = sliceRegexp.exec(objBody);
-  const sliceKey = result && result[1]
-    .replace(/\$/g, '\\$')
-    .replace(/\$|^'|^"|'$|"$/g, '');
-  result = spliceRegexp.exec(objBody);
-  const spliceKey = result && result[1]
-    .replace(/\$/g, '\\$')
-    .replace(/\$|^'|^"|'$|"$/g, '');
-  result = swapRegexp.exec(objBody);
-  const swapKey = result && result[1]
-    .replace(/\$/g, '\\$')
-    .replace(/\$|^'|^"|'$|"$/g, '');
-
-  const keys = `(${[reverseKey, sliceKey, spliceKey, swapKey].join('|')})`;
-  const myreg = `(?:a=)?${obj
-  }(?:\\.${keys}|\\['${keys}'\\]|\\["${keys}"\\])` +
-    `\\(a,(\\d+)\\)`;
-  const tokenizeRegexp = new RegExp(myreg, 'g');
-  const tokens = [];
-  while ((result = tokenizeRegexp.exec(funcBody)) !== null) {
-    let key = result[1] || result[2] || result[3];
-    switch (key) {
-      case swapKey:
-        tokens.push(`w${result[4]}`);
-        break;
-      case reverseKey:
-        tokens.push('r');
-        break;
-      case sliceKey:
-        tokens.push(`s${result[4]}`);
-        break;
-      case spliceKey:
-        tokens.push(`p${result[4]}`);
-        break;
-    }
-  }
-  return tokens;
-};
-
-
-/**
- * @param {Object} format
- * @param {string} sig
- */
-exports.setDownloadURL = (format, sig) => {
-  let decodedUrl;
-  if (format.url) {
-    decodedUrl = format.url;
-  } else {
-    return;
-  }
-
-  try {
-    decodedUrl = decodeURIComponent(decodedUrl);
-  } catch (err) {
-    return;
-  }
-
-  // Make some adjustments to the final url.
-  const parsedUrl = new URL(decodedUrl);
-
-  // This is needed for a speedier download.
-  // See https://github.com/fent/node-ytdl-core/issues/127
-  parsedUrl.searchParams.set('ratebypass', 'yes');
-
-  if (sig) {
-    // When YouTube provides a `sp` parameter the signature `sig` must go
-    // into the parameter it specifies.
-    // See https://github.com/fent/node-ytdl-core/issues/417
-    parsedUrl.searchParams.set(format.sp || 'signature', sig);
-  }
-
-  format.url = parsedUrl.toString();
-};
-
-
-/**
- * Applies `sig.decipher()` to all format URL's.
- *
- * @param {Array.<Object>} formats
- * @param {string} html5player
- * @param {Object} options
- */
-exports.decipherFormats = async(formats, html5player, options) => {
-  let decipheredFormats = {};
-  let tokens = await exports.getTokens(html5player, options);
-  formats.forEach(format => {
-    let cipher = format.signatureCipher || format.cipher;
-    if (cipher) {
-      Object.assign(format, querystring.parse(cipher));
-      delete format.signatureCipher;
-      delete format.cipher;
-    }
-    const sig = tokens && format.s ? exports.decipher(tokens, format.s) : null;
-    exports.setDownloadURL(format, sig);
-    decipheredFormats[format.url] = format;
-  });
-  return decipheredFormats;
-};
-
-},{"./cache":1,"./url-utils":8,"miniget":18,"querystring":31}],8:[function(require,module,exports){
-/**
- * URL constructor
- *
- * For compatibility with browser and Node.js APIs
- */
-const URL = typeof window !== 'undefined' ? window.URL : require('url').URL; /* global window */
-
-exports.URL = URL;
-
-
-/**
- * Get video ID.
- *
- * There are a few type of video URL formats.
- *  - https://www.youtube.com/watch?v=VIDEO_ID
- *  - https://m.youtube.com/watch?v=VIDEO_ID
- *  - https://youtu.be/VIDEO_ID
- *  - https://www.youtube.com/v/VIDEO_ID
- *  - https://www.youtube.com/embed/VIDEO_ID
- *  - https://music.youtube.com/watch?v=VIDEO_ID
- *  - https://gaming.youtube.com/watch?v=VIDEO_ID
- *
- * @param {string} link
- * @return {string}
- * @throws {Error} If unable to find a id
- * @throws {TypeError} If videoid doesn't match specs
- */
-const validQueryDomains = new Set([
-  'youtube.com',
-  'www.youtube.com',
-  'm.youtube.com',
-  'music.youtube.com',
-  'gaming.youtube.com',
-]);
-const validPathDomains = /^https?:\/\/(youtu\.be\/|(www\.)?youtube.com\/(embed|v|shorts)\/)/;
-exports.getURLVideoID = link => {
-  const parsed = new URL(link);
-  let id = parsed.searchParams.get('v');
-  if (validPathDomains.test(link) && !id) {
-    const paths = parsed.pathname.split('/');
-    id = paths[paths.length - 1];
-  } else if (parsed.hostname && !validQueryDomains.has(parsed.hostname)) {
-    throw Error('Not a YouTube domain');
-  }
-  if (!id) {
-    throw Error(`No video id found: ${link}`);
-  }
-  id = id.substring(0, 11);
-  if (!exports.validateID(id)) {
-    throw TypeError(`Video id (${id}) does not match expected ` +
-      `format (${idRegex.toString()})`);
-  }
-  return id;
-};
-
-
-/**
- * Gets video ID either from a url or by checking if the given string
- * matches the video ID format.
- *
- * @param {string} str
- * @returns {string}
- * @throws {Error} If unable to find a id
- * @throws {TypeError} If videoid doesn't match specs
- */
-const urlRegex = /^https?:\/\//;
-exports.getVideoID = str => {
-  if (exports.validateID(str)) {
-    return str;
-  } else if (urlRegex.test(str)) {
-    return exports.getURLVideoID(str);
-  } else {
-    throw Error(`No video id found: ${str}`);
-  }
-};
-
-
-/**
- * Returns true if given id satifies YouTube's id format.
- *
- * @param {string} id
- * @return {boolean}
- */
-const idRegex = /^[a-zA-Z0-9-_]{11}$/;
-exports.validateID = id => idRegex.test(id);
-
-
-/**
- * Checks wether the input string includes a valid id.
- *
- * @param {string} string
- * @returns {boolean}
- */
-exports.validateURL = string => {
-  try {
-    exports.getURLVideoID(string);
-    return true;
-  } catch (e) {
-    return false;
-  }
-};
-
-},{"url":71}],9:[function(require,module,exports){
-(function (process){(function (){
-const miniget = require('miniget');
-
-
-/**
- * Extract string inbetween another.
- *
- * @param {string} haystack
- * @param {string} left
- * @param {string} right
- * @returns {string}
- */
-exports.between = (haystack, left, right) => {
-  let pos;
-  if (left instanceof RegExp) {
-    const match = haystack.match(left);
-    if (!match) { return ''; }
-    pos = match.index + match[0].length;
-  } else {
-    pos = haystack.indexOf(left);
-    if (pos === -1) { return ''; }
-    pos += left.length;
-  }
-  haystack = haystack.slice(pos);
-  pos = haystack.indexOf(right);
-  if (pos === -1) { return ''; }
-  haystack = haystack.slice(0, pos);
-  return haystack;
-};
-
-
-/**
- * Get a number from an abbreviated number string.
- *
- * @param {string} string
- * @returns {number}
- */
-exports.parseAbbreviatedNumber = string => {
-  const match = string
-    .replace(',', '.')
-    .replace(' ', '')
-    .match(/([\d,.]+)([MK]?)/);
-  if (match) {
-    let [, num, multi] = match;
-    num = parseFloat(num);
-    return Math.round(multi === 'M' ? num * 1000000 :
-      multi === 'K' ? num * 1000 : num);
-  }
-  return null;
-};
-
-
-/**
- * Match begin and end braces of input JSON, return only json
- *
- * @param {string} mixedJson
- * @returns {string}
-*/
-exports.cutAfterJSON = mixedJson => {
-  let open, close;
-  if (mixedJson[0] === '[') {
-    open = '[';
-    close = ']';
-  } else if (mixedJson[0] === '{') {
-    open = '{';
-    close = '}';
-  }
-
-  if (!open) {
-    throw new Error(`Can't cut unsupported JSON (need to begin with [ or { ) but got: ${mixedJson[0]}`);
-  }
-
-  // States if the loop is currently in a string
-  let isString = false;
-
-  // States if the current character is treated as escaped or not
-  let isEscaped = false;
-
-  // Current open brackets to be closed
-  let counter = 0;
-
-  let i;
-  for (i = 0; i < mixedJson.length; i++) {
-    // Toggle the isString boolean when leaving/entering string
-    if (mixedJson[i] === '"' && !isEscaped) {
-      isString = !isString;
-      continue;
-    }
-
-    // Toggle the isEscaped boolean for every backslash
-    // Reset for every regular character
-    isEscaped = mixedJson[i] === '\\' && !isEscaped;
-
-    if (isString) continue;
-
-    if (mixedJson[i] === open) {
-      counter++;
-    } else if (mixedJson[i] === close) {
-      counter--;
-    }
-
-    // All brackets have been closed, thus end of JSON is reached
-    if (counter === 0) {
-      // Return the cut JSON
-      return mixedJson.substr(0, i + 1);
-    }
-  }
-
-  // We ran through the whole string and ended up with an unclosed bracket
-  throw Error("Can't cut unsupported JSON (no matching closing bracket found)");
-};
-
-
-/**
- * Checks if there is a playability error.
- *
- * @param {Object} player_response
- * @param {Array.<string>} statuses
- * @param {Error} ErrorType
- * @returns {!Error}
- */
-exports.playError = (player_response, statuses, ErrorType = Error) => {
-  let playability = player_response && player_response.playabilityStatus;
-  if (playability && statuses.includes(playability.status)) {
-    return new ErrorType(playability.reason || (playability.messages && playability.messages[0]));
-  }
-  return null;
-};
-
-
-/**
- * Temporary helper to help deprecating a few properties.
- *
- * @param {Object} obj
- * @param {string} prop
- * @param {Object} value
- * @param {string} oldPath
- * @param {string} newPath
- */
-exports.deprecate = (obj, prop, value, oldPath, newPath) => {
-  Object.defineProperty(obj, prop, {
-    get: () => {
-      console.warn(`\`${oldPath}\` will be removed in a near future release, ` +
-        `use \`${newPath}\` instead.`);
-      return value;
-    },
-  });
-};
-
-
-// Check for updates.
-const pkg = require('../package.json');
-const UPDATE_INTERVAL = 1000 * 60 * 60 * 12;
-exports.lastUpdateCheck = 0;
-exports.checkForUpdates = () => {
-  if (!process.env.YTDL_NO_UPDATE && !pkg.version.startsWith('0.0.0-') &&
-    Date.now() - exports.lastUpdateCheck >= UPDATE_INTERVAL) {
-    exports.lastUpdateCheck = Date.now();
-    return miniget('https://api.github.com/repos/fent/node-ytdl-core/releases/latest', {
-      headers: { 'User-Agent': 'ytdl-core' },
-    }).text().then(response => {
-      if (JSON.parse(response).tag_name !== `v${pkg.version}`) {
-        console.warn('\x1b[33mWARNING:\x1B[0m ytdl-core is out of date! Update with "npm install ytdl-core@latest".');
-      }
-    }, err => {
-      console.warn('Error checking for updates:', err.message);
-      console.warn('You can disable this check by setting the `YTDL_NO_UPDATE` env variable.');
-    });
-  }
-  return null;
-};
-
-}).call(this)}).call(this,require('_process'))
-},{"../package.json":10,"_process":27,"miniget":18}],10:[function(require,module,exports){
-module.exports={
-  "name": "ytdl-core",
-  "description": "YouTube video downloader in pure javascript.",
-  "keywords": [
-    "youtube",
-    "video",
-    "download"
-  ],
-  "version": "0.0.0-development",
-  "repository": {
-    "type": "git",
-    "url": "git://github.com/fent/node-ytdl-core.git"
-  },
-  "author": "fent <fentbox@gmail.com> (https://github.com/fent)",
-  "contributors": [
-    "Tobias Kutscha (https://github.com/TimeForANinja)",
-    "Andrew Kelley (https://github.com/andrewrk)",
-    "Mauricio Allende (https://github.com/mallendeo)",
-    "Rodrigo Altamirano (https://github.com/raltamirano)",
-    "Jim Buck (https://github.com/JimmyBoh)"
-  ],
-  "main": "./lib/index.js",
-  "types": "./typings/index.d.ts",
-  "files": [
-    "lib",
-    "typings"
-  ],
-  "scripts": {
-    "test": "nyc --reporter=lcov --reporter=text-summary npm run test:unit",
-    "test:unit": "mocha --ignore test/irl-test.js test/*-test.js --timeout 4000",
-    "test:irl": "mocha --timeout 16000 test/irl-test.js",
-    "lint": "eslint ./",
-    "lint:fix": "eslint --fix ./",
-    "lint:typings": "tslint typings/index.d.ts",
-    "lint:typings:fix": "tslint --fix typings/index.d.ts"
-  },
-  "dependencies": {
-    "m3u8stream": "file:./submodules/node-m3u8stream/",
-    "miniget": "file:./submodules/node-miniget/",
-    "sax": "^1.1.3"
-  },
-  "devDependencies": {
-    "@types/node": "^13.1.0",
-    "assert-diff": "^3.0.1",
-    "dtslint": "^3.6.14",
-    "eslint": "^6.8.0",
-    "mocha": "^7.0.0",
-    "muk-require": "^1.2.0",
-    "nock": "^13.0.4",
-    "nyc": "^15.0.0",
-    "sinon": "^9.0.0",
-    "stream-equal": "~1.1.0",
-    "typescript": "^3.9.7"
-  },
-  "engines": {
-    "node": ">=10"
-  },
-  "license": "MIT"
-}
-
-},{}],11:[function(require,module,exports){
 "use strict";
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -2616,7 +182,7 @@ class DashMPDParser extends stream_1.Writable {
 }
 exports.default = DashMPDParser;
 
-},{"./parse-time":14,"sax":17,"stream":34}],12:[function(require,module,exports){
+},{"./parse-time":4,"sax":7,"stream":23}],2:[function(require,module,exports){
 "use strict";
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -2807,7 +373,7 @@ let m3u8stream = ((playlistURL, options = {}) => {
 m3u8stream.parseTimestamp = parse_time_1.humanStr;
 module.exports = m3u8stream;
 
-},{"./dash-mpd-parser":11,"./m3u8-parser":13,"./parse-time":14,"./queue":15,"miniget":16,"stream":34,"url":71}],13:[function(require,module,exports){
+},{"./dash-mpd-parser":1,"./m3u8-parser":3,"./parse-time":4,"./queue":5,"miniget":6,"stream":23,"url":60}],3:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const stream_1 = require("stream");
@@ -2919,7 +485,7 @@ class m3u8Parser extends stream_1.Writable {
 }
 exports.default = m3u8Parser;
 
-},{"stream":34}],14:[function(require,module,exports){
+},{"stream":23}],4:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.durationStr = exports.humanStr = void 0;
@@ -2979,7 +545,7 @@ exports.durationStr = (time) => {
     return total;
 };
 
-},{}],15:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Queue = void 0;
@@ -3038,7 +604,7 @@ class Queue {
 }
 exports.Queue = Queue;
 
-},{}],16:[function(require,module,exports){
+},{}],6:[function(require,module,exports){
 (function (process){(function (){
 "use strict";
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
@@ -3312,7 +878,7 @@ function Miniget(url, options = {}) {
 module.exports = Miniget;
 
 }).call(this)}).call(this,require('_process'))
-},{"_process":27,"http":49,"https":24,"stream":34,"url":71}],17:[function(require,module,exports){
+},{"_process":16,"http":38,"https":13,"stream":23,"url":60}],7:[function(require,module,exports){
 (function (Buffer){(function (){
 ;(function (sax) { // wrapper for non-node envs
   sax.parser = function (strict, opt) { return new SAXParser(strict, opt) }
@@ -4881,301 +2447,7 @@ module.exports = Miniget;
 })(typeof exports === 'undefined' ? this.sax = {} : exports)
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":21,"stream":34,"string_decoder":69}],18:[function(require,module,exports){
-(function (process){(function (){
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-const http_1 = __importDefault(require("http"));
-const https_1 = __importDefault(require("https"));
-const stream_1 = require("stream");
-/**
- * URL constructor
- *
- * For compatibility with browser and Node.js APIs
- */
-const URL = typeof window !== 'undefined' ? window.URL : require('url').URL; /* global window */
-const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
-const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
-const retryStatusCodes = new Set([429, 503]);
-// `request`, `response`, `abort`, left out, miniget will emit these.
-const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
-const responseEvents = ['aborted'];
-Miniget.MinigetError = class MinigetError extends Error {
-    constructor(message, statusCode) {
-        super(message);
-        this.statusCode = statusCode;
-    }
-};
-Miniget.defaultOptions = {
-    maxRedirects: 10,
-    maxRetries: 2,
-    maxReconnects: 0,
-    backoff: { inc: 100, max: 10000 },
-};
-function Miniget(url, options = {}) {
-    var _a;
-    const opts = Object.assign({}, Miniget.defaultOptions, options);
-    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
-    stream.destroyed = stream.aborted = false;
-    let activeRequest;
-    let activeResponse;
-    let activeDecodedStream;
-    let redirects = 0;
-    let retries = 0;
-    let retryTimeout;
-    let reconnects = 0;
-    let contentLength;
-    let acceptRanges = false;
-    let rangeStart = 0, rangeEnd;
-    let downloaded = 0;
-    // Check if this is a ranged request.
-    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
-        let r = /bytes=(\d+)-(\d+)?/.exec(`${opts.headers.Range}`);
-        if (r) {
-            rangeStart = parseInt(r[1], 10);
-            rangeEnd = parseInt(r[2], 10);
-        }
-    }
-    // Add `Accept-Encoding` header.
-    if (opts.acceptEncoding) {
-        opts.headers = Object.assign({
-            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', '),
-        }, opts.headers);
-    }
-    const downloadHasStarted = () => activeDecodedStream && downloaded > 0;
-    const downloadComplete = () => !acceptRanges || downloaded === contentLength;
-    const reconnect = (err) => {
-        activeDecodedStream = null;
-        retries = 0;
-        let inc = opts.backoff.inc;
-        let ms = Math.min(inc, opts.backoff.max);
-        retryTimeout = setTimeout(doDownload, ms);
-        stream.emit('reconnect', reconnects, err);
-    };
-    const reconnectIfEndedEarly = (err) => {
-        if (options.method !== 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
-            reconnect(err);
-            return true;
-        }
-        return false;
-    };
-    const retryRequest = (retryOptions) => {
-        if (stream.destroyed) {
-            return false;
-        }
-        if (downloadHasStarted()) {
-            return reconnectIfEndedEarly(retryOptions.err);
-        }
-        else if ((!retryOptions.err || retryOptions.err.message === 'ENOTFOUND') &&
-            retries++ < opts.maxRetries) {
-            let ms = retryOptions.retryAfter ||
-                Math.min(retries * opts.backoff.inc, opts.backoff.max);
-            retryTimeout = setTimeout(doDownload, ms);
-            stream.emit('retry', retries, retryOptions.err);
-            return true;
-        }
-        return false;
-    };
-    const forwardEvents = (ee, events) => {
-        for (let event of events) {
-            ee.on(event, stream.emit.bind(stream, event));
-        }
-    };
-    const doDownload = () => {
-        let parsed = {}, httpLib;
-        try {
-            let urlObj = typeof url === 'string' ? new URL(url) : url;
-            parsed = Object.assign({}, {
-                host: urlObj.host,
-                hostname: urlObj.hostname,
-                path: urlObj.pathname + urlObj.search + urlObj.hash,
-                port: urlObj.port,
-                protocol: urlObj.protocol,
-            });
-            if (urlObj.username) {
-                parsed.auth = `${urlObj.username}:${urlObj.password}`;
-            }
-            httpLib = httpLibs[String(parsed.protocol)];
-        }
-        catch (err) {
-            // Let the error be caught by the if statement below.
-        }
-        if (!httpLib) {
-            stream.emit('error', new Miniget.MinigetError(`Invalid URL: ${url}`));
-            return;
-        }
-        Object.assign(parsed, opts);
-        if (acceptRanges && downloaded > 0) {
-            let start = downloaded + rangeStart;
-            let end = rangeEnd || '';
-            parsed.headers = Object.assign({}, parsed.headers, {
-                Range: `bytes=${start}-${end}`,
-            });
-        }
-        if (opts.transform) {
-            try {
-                parsed = opts.transform(parsed);
-            }
-            catch (err) {
-                stream.emit('error', err);
-                return;
-            }
-            if (!parsed || parsed.protocol) {
-                httpLib = httpLibs[String(parsed === null || parsed === void 0 ? void 0 : parsed.protocol)];
-                if (!httpLib) {
-                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
-                    return;
-                }
-            }
-        }
-        const onError = (err) => {
-            if (stream.destroyed || stream.readableEnded) {
-                return;
-            }
-            // Needed for node v10.
-            if (stream._readableState.ended) {
-                return;
-            }
-            cleanup();
-            if (!retryRequest({ err })) {
-                stream.emit('error', err);
-            }
-            else {
-                activeRequest.removeListener('close', onRequestClose);
-            }
-        };
-        const onRequestClose = () => {
-            cleanup();
-            retryRequest({});
-        };
-        const cleanup = () => {
-            activeRequest.removeListener('close', onRequestClose);
-            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
-            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
-        };
-        const onData = (chunk) => { downloaded += chunk.length; };
-        const onEnd = () => {
-            cleanup();
-            if (!reconnectIfEndedEarly()) {
-                stream.end();
-            }
-        };
-        activeRequest = httpLib.request(parsed, (res) => {
-            // Needed for node v10, v12.
-            // istanbul ignore next
-            if (stream.destroyed) {
-                return;
-            }
-            if (redirectStatusCodes.has(res.statusCode)) {
-                if (redirects++ >= opts.maxRedirects) {
-                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
-                }
-                else {
-                    if (res.headers.location) {
-                        url = res.headers.location;
-                    }
-                    else {
-                        let err = new Miniget.MinigetError('Redirect status code given with no location', res.statusCode);
-                        stream.emit('error', err);
-                        cleanup();
-                        return;
-                    }
-                    setTimeout(doDownload, parseInt(res.headers['retry-after'] || '0', 10) * 1000);
-                    stream.emit('redirect', url);
-                }
-                cleanup();
-                return;
-                // Check for rate limiting.
-            }
-            else if (retryStatusCodes.has(res.statusCode)) {
-                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'] || '0', 10) })) {
-                    let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
-                    stream.emit('error', err);
-                }
-                cleanup();
-                return;
-            }
-            else if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
-                let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
-                if (res.statusCode >= 500) {
-                    onError(err);
-                }
-                else {
-                    stream.emit('error', err);
-                }
-                cleanup();
-                return;
-            }
-            activeDecodedStream = res;
-            if (opts.acceptEncoding && res.headers['content-encoding']) {
-                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
-                    let fn = opts.acceptEncoding[enc];
-                    if (fn) {
-                        activeDecodedStream = activeDecodedStream.pipe(fn());
-                        activeDecodedStream.on('error', onError);
-                    }
-                }
-            }
-            if (!contentLength) {
-                contentLength = parseInt(`${res.headers['content-length']}`, 10);
-                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
-                    contentLength > 0 && opts.maxReconnects > 0;
-            }
-            res.on('data', onData);
-            activeDecodedStream.on('end', onEnd);
-            activeDecodedStream.pipe(stream, { end: !acceptRanges });
-            activeResponse = res;
-            stream.emit('response', res);
-            res.on('error', onError);
-            forwardEvents(res, responseEvents);
-        });
-        activeRequest.on('error', onError);
-        activeRequest.on('close', onRequestClose);
-        forwardEvents(activeRequest, requestEvents);
-        if (stream.destroyed) {
-            streamDestroy(...destroyArgs);
-        }
-        stream.emit('request', activeRequest);
-        activeRequest.end();
-    };
-    stream.abort = (err) => {
-        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
-        stream.aborted = true;
-        stream.emit('abort');
-        stream.destroy(err);
-    };
-    let destroyArgs;
-    const streamDestroy = (err) => {
-        activeRequest.destroy(err);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
-        clearTimeout(retryTimeout);
-    };
-    stream._destroy = (...args) => {
-        stream.destroyed = true;
-        if (activeRequest) {
-            streamDestroy(...args);
-        }
-        else {
-            destroyArgs = args;
-        }
-    };
-    stream.text = () => new Promise((resolve, reject) => {
-        let body = '';
-        stream.setEncoding('utf8');
-        stream.on('data', chunk => body += chunk);
-        stream.on('end', () => resolve(body));
-        stream.on('error', reject);
-    });
-    process.nextTick(doDownload);
-    return stream;
-}
-module.exports = Miniget;
-
-}).call(this)}).call(this,require('_process'))
-},{"_process":27,"http":49,"https":24,"stream":34,"url":71}],19:[function(require,module,exports){
+},{"buffer":10,"stream":23,"string_decoder":58}],8:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -5327,9 +2599,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],20:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 
-},{}],21:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -7110,7 +4382,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":19,"buffer":21,"ieee754":25}],22:[function(require,module,exports){
+},{"base64-js":8,"buffer":10,"ieee754":14}],11:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -7176,7 +4448,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],23:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -7675,7 +4947,7 @@ function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
   }
 }
 
-},{}],24:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 var http = require('http')
 var url = require('url')
 
@@ -7708,7 +4980,7 @@ function validateParams (params) {
   return params
 }
 
-},{"http":49,"url":71}],25:[function(require,module,exports){
+},{"http":38,"url":60}],14:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
@@ -7795,7 +5067,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],26:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -7824,7 +5096,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],27:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -8010,7 +5282,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],28:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 (function (global){(function (){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -8547,7 +5819,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],29:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8633,7 +5905,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],30:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8720,13 +5992,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],31:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":29,"./encode":30}],32:[function(require,module,exports){
+},{"./decode":18,"./encode":19}],21:[function(require,module,exports){
 /*! safe-buffer. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
@@ -8793,9 +6065,9 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":21}],33:[function(require,module,exports){
-arguments[4][17][0].apply(exports,arguments)
-},{"buffer":21,"dup":17,"stream":34,"string_decoder":69}],34:[function(require,module,exports){
+},{"buffer":10}],22:[function(require,module,exports){
+arguments[4][7][0].apply(exports,arguments)
+},{"buffer":10,"dup":7,"stream":23,"string_decoder":58}],23:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8926,7 +6198,7 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":23,"inherits":26,"readable-stream/lib/_stream_duplex.js":36,"readable-stream/lib/_stream_passthrough.js":37,"readable-stream/lib/_stream_readable.js":38,"readable-stream/lib/_stream_transform.js":39,"readable-stream/lib/_stream_writable.js":40,"readable-stream/lib/internal/streams/end-of-stream.js":44,"readable-stream/lib/internal/streams/pipeline.js":46}],35:[function(require,module,exports){
+},{"events":12,"inherits":15,"readable-stream/lib/_stream_duplex.js":25,"readable-stream/lib/_stream_passthrough.js":26,"readable-stream/lib/_stream_readable.js":27,"readable-stream/lib/_stream_transform.js":28,"readable-stream/lib/_stream_writable.js":29,"readable-stream/lib/internal/streams/end-of-stream.js":33,"readable-stream/lib/internal/streams/pipeline.js":35}],24:[function(require,module,exports){
 'use strict';
 
 function _inheritsLoose(subClass, superClass) { subClass.prototype = Object.create(superClass.prototype); subClass.prototype.constructor = subClass; subClass.__proto__ = superClass; }
@@ -9055,7 +6327,7 @@ createErrorType('ERR_UNKNOWN_ENCODING', function (arg) {
 createErrorType('ERR_STREAM_UNSHIFT_AFTER_END_EVENT', 'stream.unshift() after end event');
 module.exports.codes = codes;
 
-},{}],36:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 (function (process){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -9197,7 +6469,7 @@ Object.defineProperty(Duplex.prototype, 'destroyed', {
   }
 });
 }).call(this)}).call(this,require('_process'))
-},{"./_stream_readable":38,"./_stream_writable":40,"_process":27,"inherits":26}],37:[function(require,module,exports){
+},{"./_stream_readable":27,"./_stream_writable":29,"_process":16,"inherits":15}],26:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -9237,7 +6509,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":39,"inherits":26}],38:[function(require,module,exports){
+},{"./_stream_transform":28,"inherits":15}],27:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -10364,7 +7636,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":35,"./_stream_duplex":36,"./internal/streams/async_iterator":41,"./internal/streams/buffer_list":42,"./internal/streams/destroy":43,"./internal/streams/from":45,"./internal/streams/state":47,"./internal/streams/stream":48,"_process":27,"buffer":21,"events":23,"inherits":26,"string_decoder/":69,"util":20}],39:[function(require,module,exports){
+},{"../errors":24,"./_stream_duplex":25,"./internal/streams/async_iterator":30,"./internal/streams/buffer_list":31,"./internal/streams/destroy":32,"./internal/streams/from":34,"./internal/streams/state":36,"./internal/streams/stream":37,"_process":16,"buffer":10,"events":12,"inherits":15,"string_decoder/":58,"util":9}],28:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -10566,7 +7838,7 @@ function done(stream, er, data) {
   if (stream._transformState.transforming) throw new ERR_TRANSFORM_ALREADY_TRANSFORMING();
   return stream.push(null);
 }
-},{"../errors":35,"./_stream_duplex":36,"inherits":26}],40:[function(require,module,exports){
+},{"../errors":24,"./_stream_duplex":25,"inherits":15}],29:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -11266,7 +8538,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":35,"./_stream_duplex":36,"./internal/streams/destroy":43,"./internal/streams/state":47,"./internal/streams/stream":48,"_process":27,"buffer":21,"inherits":26,"util-deprecate":73}],41:[function(require,module,exports){
+},{"../errors":24,"./_stream_duplex":25,"./internal/streams/destroy":32,"./internal/streams/state":36,"./internal/streams/stream":37,"_process":16,"buffer":10,"inherits":15,"util-deprecate":62}],30:[function(require,module,exports){
 (function (process){(function (){
 'use strict';
 
@@ -11476,7 +8748,7 @@ var createReadableStreamAsyncIterator = function createReadableStreamAsyncIterat
 
 module.exports = createReadableStreamAsyncIterator;
 }).call(this)}).call(this,require('_process'))
-},{"./end-of-stream":44,"_process":27}],42:[function(require,module,exports){
+},{"./end-of-stream":33,"_process":16}],31:[function(require,module,exports){
 'use strict';
 
 function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); if (enumerableOnly) symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; }); keys.push.apply(keys, symbols); } return keys; }
@@ -11687,7 +8959,7 @@ function () {
 
   return BufferList;
 }();
-},{"buffer":21,"util":20}],43:[function(require,module,exports){
+},{"buffer":10,"util":9}],32:[function(require,module,exports){
 (function (process){(function (){
 'use strict'; // undocumented cb() API, needed for core, not for public API
 
@@ -11795,7 +9067,7 @@ module.exports = {
   errorOrDestroy: errorOrDestroy
 };
 }).call(this)}).call(this,require('_process'))
-},{"_process":27}],44:[function(require,module,exports){
+},{"_process":16}],33:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/end-of-stream with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -11900,12 +9172,12 @@ function eos(stream, opts, callback) {
 }
 
 module.exports = eos;
-},{"../../../errors":35}],45:[function(require,module,exports){
+},{"../../../errors":24}],34:[function(require,module,exports){
 module.exports = function () {
   throw new Error('Readable.from is not available in the browser')
 };
 
-},{}],46:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/pump with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -12003,7 +9275,7 @@ function pipeline() {
 }
 
 module.exports = pipeline;
-},{"../../../errors":35,"./end-of-stream":44}],47:[function(require,module,exports){
+},{"../../../errors":24,"./end-of-stream":33}],36:[function(require,module,exports){
 'use strict';
 
 var ERR_INVALID_OPT_VALUE = require('../../../errors').codes.ERR_INVALID_OPT_VALUE;
@@ -12031,10 +9303,10 @@ function getHighWaterMark(state, options, duplexKey, isDuplex) {
 module.exports = {
   getHighWaterMark: getHighWaterMark
 };
-},{"../../../errors":35}],48:[function(require,module,exports){
+},{"../../../errors":24}],37:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":23}],49:[function(require,module,exports){
+},{"events":12}],38:[function(require,module,exports){
 (function (global){(function (){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -12122,7 +9394,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":51,"./lib/response":52,"builtin-status-codes":22,"url":71,"xtend":74}],50:[function(require,module,exports){
+},{"./lib/request":40,"./lib/response":41,"builtin-status-codes":11,"url":60,"xtend":63}],39:[function(require,module,exports){
 (function (global){(function (){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -12185,7 +9457,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],51:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -12541,7 +9813,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":50,"./response":52,"_process":27,"buffer":21,"inherits":26,"readable-stream":67}],52:[function(require,module,exports){
+},{"./capability":39,"./response":41,"_process":16,"buffer":10,"inherits":15,"readable-stream":56}],41:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -12756,35 +10028,35 @@ IncomingMessage.prototype._onXHRProgress = function (resetTimers) {
 }
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":50,"_process":27,"buffer":21,"inherits":26,"readable-stream":67}],53:[function(require,module,exports){
+},{"./capability":39,"_process":16,"buffer":10,"inherits":15,"readable-stream":56}],42:[function(require,module,exports){
+arguments[4][24][0].apply(exports,arguments)
+},{"dup":24}],43:[function(require,module,exports){
+arguments[4][25][0].apply(exports,arguments)
+},{"./_stream_readable":45,"./_stream_writable":47,"_process":16,"dup":25,"inherits":15}],44:[function(require,module,exports){
+arguments[4][26][0].apply(exports,arguments)
+},{"./_stream_transform":46,"dup":26,"inherits":15}],45:[function(require,module,exports){
+arguments[4][27][0].apply(exports,arguments)
+},{"../errors":42,"./_stream_duplex":43,"./internal/streams/async_iterator":48,"./internal/streams/buffer_list":49,"./internal/streams/destroy":50,"./internal/streams/from":52,"./internal/streams/state":54,"./internal/streams/stream":55,"_process":16,"buffer":10,"dup":27,"events":12,"inherits":15,"string_decoder/":58,"util":9}],46:[function(require,module,exports){
+arguments[4][28][0].apply(exports,arguments)
+},{"../errors":42,"./_stream_duplex":43,"dup":28,"inherits":15}],47:[function(require,module,exports){
+arguments[4][29][0].apply(exports,arguments)
+},{"../errors":42,"./_stream_duplex":43,"./internal/streams/destroy":50,"./internal/streams/state":54,"./internal/streams/stream":55,"_process":16,"buffer":10,"dup":29,"inherits":15,"util-deprecate":62}],48:[function(require,module,exports){
+arguments[4][30][0].apply(exports,arguments)
+},{"./end-of-stream":51,"_process":16,"dup":30}],49:[function(require,module,exports){
+arguments[4][31][0].apply(exports,arguments)
+},{"buffer":10,"dup":31,"util":9}],50:[function(require,module,exports){
+arguments[4][32][0].apply(exports,arguments)
+},{"_process":16,"dup":32}],51:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"../../../errors":42,"dup":33}],52:[function(require,module,exports){
+arguments[4][34][0].apply(exports,arguments)
+},{"dup":34}],53:[function(require,module,exports){
 arguments[4][35][0].apply(exports,arguments)
-},{"dup":35}],54:[function(require,module,exports){
+},{"../../../errors":42,"./end-of-stream":51,"dup":35}],54:[function(require,module,exports){
 arguments[4][36][0].apply(exports,arguments)
-},{"./_stream_readable":56,"./_stream_writable":58,"_process":27,"dup":36,"inherits":26}],55:[function(require,module,exports){
+},{"../../../errors":42,"dup":36}],55:[function(require,module,exports){
 arguments[4][37][0].apply(exports,arguments)
-},{"./_stream_transform":57,"dup":37,"inherits":26}],56:[function(require,module,exports){
-arguments[4][38][0].apply(exports,arguments)
-},{"../errors":53,"./_stream_duplex":54,"./internal/streams/async_iterator":59,"./internal/streams/buffer_list":60,"./internal/streams/destroy":61,"./internal/streams/from":63,"./internal/streams/state":65,"./internal/streams/stream":66,"_process":27,"buffer":21,"dup":38,"events":23,"inherits":26,"string_decoder/":69,"util":20}],57:[function(require,module,exports){
-arguments[4][39][0].apply(exports,arguments)
-},{"../errors":53,"./_stream_duplex":54,"dup":39,"inherits":26}],58:[function(require,module,exports){
-arguments[4][40][0].apply(exports,arguments)
-},{"../errors":53,"./_stream_duplex":54,"./internal/streams/destroy":61,"./internal/streams/state":65,"./internal/streams/stream":66,"_process":27,"buffer":21,"dup":40,"inherits":26,"util-deprecate":73}],59:[function(require,module,exports){
-arguments[4][41][0].apply(exports,arguments)
-},{"./end-of-stream":62,"_process":27,"dup":41}],60:[function(require,module,exports){
-arguments[4][42][0].apply(exports,arguments)
-},{"buffer":21,"dup":42,"util":20}],61:[function(require,module,exports){
-arguments[4][43][0].apply(exports,arguments)
-},{"_process":27,"dup":43}],62:[function(require,module,exports){
-arguments[4][44][0].apply(exports,arguments)
-},{"../../../errors":53,"dup":44}],63:[function(require,module,exports){
-arguments[4][45][0].apply(exports,arguments)
-},{"dup":45}],64:[function(require,module,exports){
-arguments[4][46][0].apply(exports,arguments)
-},{"../../../errors":53,"./end-of-stream":62,"dup":46}],65:[function(require,module,exports){
-arguments[4][47][0].apply(exports,arguments)
-},{"../../../errors":53,"dup":47}],66:[function(require,module,exports){
-arguments[4][48][0].apply(exports,arguments)
-},{"dup":48,"events":23}],67:[function(require,module,exports){
+},{"dup":37,"events":12}],56:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -12795,7 +10067,7 @@ exports.PassThrough = require('./lib/_stream_passthrough.js');
 exports.finished = require('./lib/internal/streams/end-of-stream.js');
 exports.pipeline = require('./lib/internal/streams/pipeline.js');
 
-},{"./lib/_stream_duplex.js":54,"./lib/_stream_passthrough.js":55,"./lib/_stream_readable.js":56,"./lib/_stream_transform.js":57,"./lib/_stream_writable.js":58,"./lib/internal/streams/end-of-stream.js":62,"./lib/internal/streams/pipeline.js":64}],68:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":43,"./lib/_stream_passthrough.js":44,"./lib/_stream_readable.js":45,"./lib/_stream_transform.js":46,"./lib/_stream_writable.js":47,"./lib/internal/streams/end-of-stream.js":51,"./lib/internal/streams/pipeline.js":53}],57:[function(require,module,exports){
 /*! stream-to-blob. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* global Blob */
 
@@ -12819,7 +10091,7 @@ function streamToBlob (stream, mimeType) {
   })
 }
 
-},{}],69:[function(require,module,exports){
+},{}],58:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13116,7 +10388,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":32}],70:[function(require,module,exports){
+},{"safe-buffer":21}],59:[function(require,module,exports){
 (function (setImmediate,clearImmediate){(function (){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -13195,7 +10467,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this)}).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":27,"timers":70}],71:[function(require,module,exports){
+},{"process/browser.js":16,"timers":59}],60:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13929,7 +11201,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":72,"punycode":28,"querystring":31}],72:[function(require,module,exports){
+},{"./util":61,"punycode":17,"querystring":20}],61:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -13947,7 +11219,7 @@ module.exports = {
   }
 };
 
-},{}],73:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 (function (global){(function (){
 
 /**
@@ -14018,7 +11290,7 @@ function config (name) {
 }
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],74:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -14039,6 +11311,2778 @@ function extend() {
     return target
 }
 
+},{}],64:[function(require,module,exports){
+const { setTimeout } = require('timers');
+
+// A cache that expires.
+module.exports = class Cache extends Map {
+  constructor(timeout = 1000) {
+    super();
+    this.timeout = timeout;
+  }
+  set(key, value) {
+    if (this.has(key)) {
+      clearTimeout(super.get(key).tid);
+    }
+    super.set(key, {
+      tid: setTimeout(this.delete.bind(this, key), this.timeout).unref(),
+      value,
+    });
+  }
+  get(key) {
+    let entry = super.get(key);
+    if (entry) {
+      return entry.value;
+    }
+    return null;
+  }
+  getOrSet(key, fn) {
+    if (this.has(key)) {
+      return this.get(key);
+    } else {
+      let value = fn();
+      this.set(key, value);
+      (async() => {
+        try {
+          await value;
+        } catch (err) {
+          this.delete(key);
+        }
+      })();
+      return value;
+    }
+  }
+  delete(key) {
+    let entry = super.get(key);
+    if (entry) {
+      clearTimeout(entry.tid);
+      super.delete(key);
+    }
+  }
+  clear() {
+    for (let entry of this.values()) {
+      clearTimeout(entry.tid);
+    }
+    super.clear();
+  }
+};
+
+},{"timers":59}],65:[function(require,module,exports){
+const utils = require('./utils');
+const FORMATS = require('./formats');
+
+
+// Use these to help sort formats, higher index is better.
+const audioEncodingRanks = [
+  'mp4a',
+  'mp3',
+  'vorbis',
+  'aac',
+  'opus',
+  'flac',
+];
+const videoEncodingRanks = [
+  'mp4v',
+  'avc1',
+  'Sorenson H.283',
+  'MPEG-4 Visual',
+  'VP8',
+  'VP9',
+  'H.264',
+];
+
+const getVideoBitrate = format => format.bitrate || 0;
+const getVideoEncodingRank = format =>
+  videoEncodingRanks.findIndex(enc => format.codecs && format.codecs.includes(enc));
+const getAudioBitrate = format => format.audioBitrate || 0;
+const getAudioEncodingRank = format =>
+  audioEncodingRanks.findIndex(enc => format.codecs && format.codecs.includes(enc));
+
+
+/**
+ * Sort formats by a list of functions.
+ *
+ * @param {Object} a
+ * @param {Object} b
+ * @param {Array.<Function>} sortBy
+ * @returns {number}
+ */
+const sortFormatsBy = (a, b, sortBy) => {
+  let res = 0;
+  for (let fn of sortBy) {
+    res = fn(b) - fn(a);
+    if (res !== 0) {
+      break;
+    }
+  }
+  return res;
+};
+
+
+const sortFormatsByVideo = (a, b) => sortFormatsBy(a, b, [
+  format => parseInt(format.qualityLabel),
+  getVideoBitrate,
+  getVideoEncodingRank,
+]);
+
+
+const sortFormatsByAudio = (a, b) => sortFormatsBy(a, b, [
+  getAudioBitrate,
+  getAudioEncodingRank,
+]);
+
+
+/**
+ * Sort formats from highest quality to lowest.
+ *
+ * @param {Object} a
+ * @param {Object} b
+ * @returns {number}
+ */
+exports.sortFormats = (a, b) => sortFormatsBy(a, b, [
+  // Formats with both video and audio are ranked highest.
+  format => +!!format.isHLS,
+  format => +!!format.isDashMPD,
+  format => +(format.contentLength > 0),
+  format => +(format.hasVideo && format.hasAudio),
+  format => +format.hasVideo,
+  format => parseInt(format.qualityLabel) || 0,
+  getVideoBitrate,
+  getAudioBitrate,
+  getVideoEncodingRank,
+  getAudioEncodingRank,
+]);
+
+
+/**
+ * Choose a format depending on the given options.
+ *
+ * @param {Array.<Object>} formats
+ * @param {Object} options
+ * @returns {Object}
+ * @throws {Error} when no format matches the filter/format rules
+ */
+exports.chooseFormat = (formats, options) => {
+  if (typeof options.format === 'object') {
+    if (!options.format.url) {
+      throw Error('Invalid format given, did you use `ytdl.getInfo()`?');
+    }
+    return options.format;
+  }
+
+  if (options.filter) {
+    formats = exports.filterFormats(formats, options.filter);
+  }
+
+  // We currently only support HLS-Formats for livestreams
+  // So we (now) remove all non-HLS streams
+  if (formats.some(fmt => fmt.isHLS)) {
+    formats = formats.filter(fmt => fmt.isHLS || !fmt.isLive);
+  }
+
+  let format;
+  const quality = options.quality || 'highest';
+  switch (quality) {
+    case 'highest':
+      format = formats[0];
+      break;
+
+    case 'lowest':
+      format = formats[formats.length - 1];
+      break;
+
+    case 'highestaudio': {
+      formats = exports.filterFormats(formats, 'audio');
+      formats.sort(sortFormatsByAudio);
+      // Filter for only the best audio format
+      const bestAudioFormat = formats[0];
+      formats = formats.filter(f => sortFormatsByAudio(bestAudioFormat, f) === 0);
+      // Check for the worst video quality for the best audio quality and pick according
+      // This does not loose default sorting of video encoding and bitrate
+      const worstVideoQuality = formats.map(f => parseInt(f.qualityLabel) || 0).sort((a, b) => a - b)[0];
+      format = formats.find(f => (parseInt(f.qualityLabel) || 0) === worstVideoQuality);
+      break;
+    }
+
+    case 'lowestaudio':
+      formats = exports.filterFormats(formats, 'audio');
+      formats.sort(sortFormatsByAudio);
+      format = formats[formats.length - 1];
+      break;
+
+    case 'highestvideo': {
+      formats = exports.filterFormats(formats, 'video');
+      formats.sort(sortFormatsByVideo);
+      // Filter for only the best video format
+      const bestVideoFormat = formats[0];
+      formats = formats.filter(f => sortFormatsByVideo(bestVideoFormat, f) === 0);
+      // Check for the worst audio quality for the best video quality and pick according
+      // This does not loose default sorting of audio encoding and bitrate
+      const worstAudioQuality = formats.map(f => f.audioBitrate || 0).sort((a, b) => a - b)[0];
+      format = formats.find(f => (f.audioBitrate || 0) === worstAudioQuality);
+      break;
+    }
+
+    case 'lowestvideo':
+      formats = exports.filterFormats(formats, 'video');
+      formats.sort(sortFormatsByVideo);
+      format = formats[formats.length - 1];
+      break;
+
+    default:
+      format = getFormatByQuality(quality, formats);
+      break;
+  }
+
+  if (!format) {
+    throw Error(`No such format found: ${quality}`);
+  }
+  return format;
+};
+
+/**
+ * Gets a format based on quality or array of quality's
+ *
+ * @param {string|[string]} quality
+ * @param {[Object]} formats
+ * @returns {Object}
+ */
+const getFormatByQuality = (quality, formats) => {
+  let getFormat = itag => formats.find(format => `${format.itag}` === `${itag}`);
+  if (Array.isArray(quality)) {
+    return getFormat(quality.find(q => getFormat(q)));
+  } else {
+    return getFormat(quality);
+  }
+};
+
+
+/**
+ * @param {Array.<Object>} formats
+ * @param {Function} filter
+ * @returns {Array.<Object>}
+ */
+exports.filterFormats = (formats, filter) => {
+  let fn;
+  switch (filter) {
+    case 'videoandaudio':
+    case 'audioandvideo':
+      fn = format => format.hasVideo && format.hasAudio;
+      break;
+
+    case 'video':
+      fn = format => format.hasVideo;
+      break;
+
+    case 'videoonly':
+      fn = format => format.hasVideo && !format.hasAudio;
+      break;
+
+    case 'audio':
+      fn = format => format.hasAudio;
+      break;
+
+    case 'audioonly':
+      fn = format => !format.hasVideo && format.hasAudio;
+      break;
+
+    default:
+      if (typeof filter === 'function') {
+        fn = filter;
+      } else {
+        throw TypeError(`Given filter (${filter}) is not supported`);
+      }
+  }
+  return formats.filter(format => !!format.url && fn(format));
+};
+
+
+/**
+ * @param {Object} format
+ * @returns {Object}
+ */
+exports.addFormatMeta = format => {
+  format = Object.assign({}, FORMATS[format.itag], format);
+  format.hasVideo = !!format.qualityLabel;
+  format.hasAudio = !!format.audioBitrate;
+  format.container = format.mimeType ?
+    format.mimeType.split(';')[0].split('/')[1] : null;
+  format.codecs = format.mimeType ?
+    utils.between(format.mimeType, 'codecs="', '"') : null;
+  format.videoCodec = format.hasVideo && format.codecs ?
+    format.codecs.split(', ')[0] : null;
+  format.audioCodec = format.hasAudio && format.codecs ?
+    format.codecs.split(', ').slice(-1)[0] : null;
+  format.isLive = /\bsource[/=]yt_live_broadcast\b/.test(format.url);
+  format.isHLS = /\/manifest\/hls_(variant|playlist)\//.test(format.url);
+  format.isDashMPD = /\/manifest\/dash\//.test(format.url);
+  return format;
+};
+
+},{"./formats":66,"./utils":72}],66:[function(require,module,exports){
+/**
+ * http://en.wikipedia.org/wiki/YouTube#Quality_and_formats
+ */
+module.exports = {
+
+  5: {
+    mimeType: 'video/flv; codecs="Sorenson H.283, mp3"',
+    qualityLabel: '240p',
+    bitrate: 250000,
+    audioBitrate: 64,
+  },
+
+  6: {
+    mimeType: 'video/flv; codecs="Sorenson H.263, mp3"',
+    qualityLabel: '270p',
+    bitrate: 800000,
+    audioBitrate: 64,
+  },
+
+  13: {
+    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
+    qualityLabel: null,
+    bitrate: 500000,
+    audioBitrate: null,
+  },
+
+  17: {
+    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
+    qualityLabel: '144p',
+    bitrate: 50000,
+    audioBitrate: 24,
+  },
+
+  18: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '360p',
+    bitrate: 500000,
+    audioBitrate: 96,
+  },
+
+  22: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 2000000,
+    audioBitrate: 192,
+  },
+
+  34: {
+    mimeType: 'video/flv; codecs="H.264, aac"',
+    qualityLabel: '360p',
+    bitrate: 500000,
+    audioBitrate: 128,
+  },
+
+  35: {
+    mimeType: 'video/flv; codecs="H.264, aac"',
+    qualityLabel: '480p',
+    bitrate: 800000,
+    audioBitrate: 128,
+  },
+
+  36: {
+    mimeType: 'video/3gp; codecs="MPEG-4 Visual, aac"',
+    qualityLabel: '240p',
+    bitrate: 175000,
+    audioBitrate: 32,
+  },
+
+  37: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '1080p',
+    bitrate: 3000000,
+    audioBitrate: 192,
+  },
+
+  38: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '3072p',
+    bitrate: 3500000,
+    audioBitrate: 192,
+  },
+
+  43: {
+    mimeType: 'video/webm; codecs="VP8, vorbis"',
+    qualityLabel: '360p',
+    bitrate: 500000,
+    audioBitrate: 128,
+  },
+
+  44: {
+    mimeType: 'video/webm; codecs="VP8, vorbis"',
+    qualityLabel: '480p',
+    bitrate: 1000000,
+    audioBitrate: 128,
+  },
+
+  45: {
+    mimeType: 'video/webm; codecs="VP8, vorbis"',
+    qualityLabel: '720p',
+    bitrate: 2000000,
+    audioBitrate: 192,
+  },
+
+  46: {
+    mimeType: 'audio/webm; codecs="vp8, vorbis"',
+    qualityLabel: '1080p',
+    bitrate: null,
+    audioBitrate: 192,
+  },
+
+  82: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '360p',
+    bitrate: 500000,
+    audioBitrate: 96,
+  },
+
+  83: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '240p',
+    bitrate: 500000,
+    audioBitrate: 96,
+  },
+
+  84: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 2000000,
+    audioBitrate: 192,
+  },
+
+  85: {
+    mimeType: 'video/mp4; codecs="H.264, aac"',
+    qualityLabel: '1080p',
+    bitrate: 3000000,
+    audioBitrate: 192,
+  },
+
+  91: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '144p',
+    bitrate: 100000,
+    audioBitrate: 48,
+  },
+
+  92: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '240p',
+    bitrate: 150000,
+    audioBitrate: 48,
+  },
+
+  93: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '360p',
+    bitrate: 500000,
+    audioBitrate: 128,
+  },
+
+  94: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '480p',
+    bitrate: 800000,
+    audioBitrate: 128,
+  },
+
+  95: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 1500000,
+    audioBitrate: 256,
+  },
+
+  96: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '1080p',
+    bitrate: 2500000,
+    audioBitrate: 256,
+  },
+
+  100: {
+    mimeType: 'audio/webm; codecs="VP8, vorbis"',
+    qualityLabel: '360p',
+    bitrate: null,
+    audioBitrate: 128,
+  },
+
+  101: {
+    mimeType: 'audio/webm; codecs="VP8, vorbis"',
+    qualityLabel: '360p',
+    bitrate: null,
+    audioBitrate: 192,
+  },
+
+  102: {
+    mimeType: 'audio/webm; codecs="VP8, vorbis"',
+    qualityLabel: '720p',
+    bitrate: null,
+    audioBitrate: 192,
+  },
+
+  120: {
+    mimeType: 'video/flv; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 2000000,
+    audioBitrate: 128,
+  },
+
+  127: {
+    mimeType: 'audio/ts; codecs="aac"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 96,
+  },
+
+  128: {
+    mimeType: 'audio/ts; codecs="aac"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 96,
+  },
+
+  132: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '240p',
+    bitrate: 150000,
+    audioBitrate: 48,
+  },
+
+  133: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '240p',
+    bitrate: 200000,
+    audioBitrate: null,
+  },
+
+  134: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '360p',
+    bitrate: 300000,
+    audioBitrate: null,
+  },
+
+  135: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '480p',
+    bitrate: 500000,
+    audioBitrate: null,
+  },
+
+  136: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '720p',
+    bitrate: 1000000,
+    audioBitrate: null,
+  },
+
+  137: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '1080p',
+    bitrate: 2500000,
+    audioBitrate: null,
+  },
+
+  138: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '4320p',
+    bitrate: 13500000,
+    audioBitrate: null,
+  },
+
+  139: {
+    mimeType: 'audio/mp4; codecs="aac"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 48,
+  },
+
+  140: {
+    mimeType: 'audio/m4a; codecs="aac"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 128,
+  },
+
+  141: {
+    mimeType: 'audio/mp4; codecs="aac"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 256,
+  },
+
+  151: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 50000,
+    audioBitrate: 24,
+  },
+
+  160: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '144p',
+    bitrate: 100000,
+    audioBitrate: null,
+  },
+
+  171: {
+    mimeType: 'audio/webm; codecs="vorbis"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 128,
+  },
+
+  172: {
+    mimeType: 'audio/webm; codecs="vorbis"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 192,
+  },
+
+  242: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '240p',
+    bitrate: 100000,
+    audioBitrate: null,
+  },
+
+  243: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '360p',
+    bitrate: 250000,
+    audioBitrate: null,
+  },
+
+  244: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '480p',
+    bitrate: 500000,
+    audioBitrate: null,
+  },
+
+  247: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '720p',
+    bitrate: 700000,
+    audioBitrate: null,
+  },
+
+  248: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1080p',
+    bitrate: 1500000,
+    audioBitrate: null,
+  },
+
+  249: {
+    mimeType: 'audio/webm; codecs="opus"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 48,
+  },
+
+  250: {
+    mimeType: 'audio/webm; codecs="opus"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 64,
+  },
+
+  251: {
+    mimeType: 'audio/webm; codecs="opus"',
+    qualityLabel: null,
+    bitrate: null,
+    audioBitrate: 160,
+  },
+
+  264: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '1440p',
+    bitrate: 4000000,
+    audioBitrate: null,
+  },
+
+  266: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '2160p',
+    bitrate: 12500000,
+    audioBitrate: null,
+  },
+
+  271: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1440p',
+    bitrate: 9000000,
+    audioBitrate: null,
+  },
+
+  272: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '4320p',
+    bitrate: 20000000,
+    audioBitrate: null,
+  },
+
+  278: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '144p 30fps',
+    bitrate: 80000,
+    audioBitrate: null,
+  },
+
+  298: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '720p',
+    bitrate: 3000000,
+    audioBitrate: null,
+  },
+
+  299: {
+    mimeType: 'video/mp4; codecs="H.264"',
+    qualityLabel: '1080p',
+    bitrate: 5500000,
+    audioBitrate: null,
+  },
+
+  300: {
+    mimeType: 'video/ts; codecs="H.264, aac"',
+    qualityLabel: '720p',
+    bitrate: 1318000,
+    audioBitrate: 48,
+  },
+
+  302: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '720p HFR',
+    bitrate: 2500000,
+    audioBitrate: null,
+  },
+
+  303: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1080p HFR',
+    bitrate: 5000000,
+    audioBitrate: null,
+  },
+
+  308: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1440p HFR',
+    bitrate: 10000000,
+    audioBitrate: null,
+  },
+
+  313: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '2160p',
+    bitrate: 13000000,
+    audioBitrate: null,
+  },
+
+  315: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '2160p HFR',
+    bitrate: 20000000,
+    audioBitrate: null,
+  },
+
+  330: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '144p HDR, HFR',
+    bitrate: 80000,
+    audioBitrate: null,
+  },
+
+  331: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '240p HDR, HFR',
+    bitrate: 100000,
+    audioBitrate: null,
+  },
+
+  332: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '360p HDR, HFR',
+    bitrate: 250000,
+    audioBitrate: null,
+  },
+
+  333: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '240p HDR, HFR',
+    bitrate: 500000,
+    audioBitrate: null,
+  },
+
+  334: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '720p HDR, HFR',
+    bitrate: 1000000,
+    audioBitrate: null,
+  },
+
+  335: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1080p HDR, HFR',
+    bitrate: 1500000,
+    audioBitrate: null,
+  },
+
+  336: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '1440p HDR, HFR',
+    bitrate: 5000000,
+    audioBitrate: null,
+  },
+
+  337: {
+    mimeType: 'video/webm; codecs="VP9"',
+    qualityLabel: '2160p HDR, HFR',
+    bitrate: 12000000,
+    audioBitrate: null,
+  },
+
+};
+
+},{}],67:[function(require,module,exports){
+(function (setImmediate){(function (){
+const PassThrough = require('stream').PassThrough;
+const getInfo = require('./info');
+const utils = require('./utils');
+const formatUtils = require('./format-utils');
+const urlUtils = require('./url-utils');
+const sig = require('./sig');
+const miniget = require('miniget');
+const m3u8stream = require('m3u8stream');
+const { parseTimestamp } = require('m3u8stream');
+
+
+/**
+ * @param {string} link
+ * @param {!Object} options
+ * @returns {ReadableStream}
+ */
+const ytdl = (link, options) => {
+  const stream = createStream(options);
+  ytdl.getInfo(link, options).then(info => {
+    downloadFromInfoCallback(stream, info, options);
+  }, stream.emit.bind(stream, 'error'));
+  return stream;
+};
+module.exports = ytdl;
+
+ytdl.getBasicInfo = getInfo.getBasicInfo;
+ytdl.getInfo = getInfo.getInfo;
+ytdl.chooseFormat = formatUtils.chooseFormat;
+ytdl.filterFormats = formatUtils.filterFormats;
+ytdl.validateID = urlUtils.validateID;
+ytdl.validateURL = urlUtils.validateURL;
+ytdl.getURLVideoID = urlUtils.getURLVideoID;
+ytdl.getVideoID = urlUtils.getVideoID;
+ytdl.cache = {
+  sig: sig.cache,
+  info: getInfo.cache,
+  watch: getInfo.watchPageCache,
+  cookie: getInfo.cookieCache,
+};
+ytdl.version = require('../package.json').version;
+
+
+const createStream = options => {
+  const stream = new PassThrough({
+    highWaterMark: (options && options.highWaterMark) || 1024 * 512,
+  });
+  stream._destroy = () => { stream.destroyed = true; };
+  return stream;
+};
+
+
+const pipeAndSetEvents = (req, stream, end) => {
+  // Forward events from the request to the stream.
+  [
+    'abort', 'request', 'response', 'error', 'redirect', 'retry', 'reconnect',
+  ].forEach(event => {
+    req.prependListener(event, stream.emit.bind(stream, event));
+  });
+  req.pipe(stream, { end });
+};
+
+
+/**
+ * Chooses a format to download.
+ *
+ * @param {stream.Readable} stream
+ * @param {Object} info
+ * @param {Object} options
+ */
+const downloadFromInfoCallback = (stream, info, options) => {
+  options = options || {};
+
+  let err = utils.playError(info.player_response, ['UNPLAYABLE', 'LIVE_STREAM_OFFLINE', 'LOGIN_REQUIRED']);
+  if (err) {
+    stream.emit('error', err);
+    return;
+  }
+
+  if (!info.formats.length) {
+    stream.emit('error', Error('This video is unavailable'));
+    return;
+  }
+
+  let format;
+  try {
+    format = formatUtils.chooseFormat(info.formats, options);
+  } catch (e) {
+    stream.emit('error', e);
+    return;
+  }
+  stream.emit('info', info, format);
+  if (stream.destroyed) { return; }
+
+  let contentLength, downloaded = 0;
+  const ondata = chunk => {
+    downloaded += chunk.length;
+    stream.emit('progress', chunk.length, downloaded, contentLength);
+  };
+
+  // Download the file in chunks, in this case the default is 10MB,
+  // anything over this will cause youtube to throttle the download
+  const dlChunkSize = options.dlChunkSize || 1024 * 1024 * 10;
+  let req;
+  let shouldEnd = true;
+
+  if (format.isHLS || format.isDashMPD) {
+    req = m3u8stream(format.url, {
+      chunkReadahead: +info.live_chunk_readahead,
+      begin: options.begin || (format.isLive && Date.now()),
+      liveBuffer: options.liveBuffer,
+      requestOptions: options.requestOptions,
+      parser: format.isDashMPD ? 'dash-mpd' : 'm3u8',
+      id: format.itag,
+    });
+
+    req.on('progress', (segment, totalSegments) => {
+      stream.emit('progress', segment.size, segment.num, totalSegments);
+    });
+    pipeAndSetEvents(req, stream, shouldEnd);
+  } else {
+    const requestOptions = Object.assign({}, options.requestOptions, {
+      maxReconnects: 6,
+      maxRetries: 3,
+      backoff: { inc: 500, max: 10000 },
+    });
+
+    let shouldBeChunked = dlChunkSize !== 0 && (!format.hasAudio || !format.hasVideo);
+
+    if (shouldBeChunked) {
+      let start = (options.range && options.range.start) || 0;
+      let end = start + dlChunkSize;
+      const rangeEnd = options.range && options.range.end;
+
+      contentLength = options.range ?
+        (rangeEnd ? rangeEnd + 1 : parseInt(format.contentLength)) - start :
+        parseInt(format.contentLength);
+
+      const getNextChunk = () => {
+        if (!rangeEnd && end >= contentLength) end = 0;
+        if (rangeEnd && end > rangeEnd) end = rangeEnd;
+        shouldEnd = !end || end === rangeEnd;
+
+        requestOptions.headers = Object.assign({}, requestOptions.headers, {
+          Range: `bytes=${start}-${end || ''}`,
+        });
+
+        req = miniget(format.url, requestOptions);
+        req.on('data', ondata);
+        req.on('end', () => {
+          if (stream.destroyed) { return; }
+          if (end && end !== rangeEnd) {
+            start = end + 1;
+            end += dlChunkSize;
+            getNextChunk();
+          }
+        });
+        pipeAndSetEvents(req, stream, shouldEnd);
+      };
+      getNextChunk();
+    } else {
+      // Audio only and video only formats don't support begin
+      if (options.begin) {
+        format.url += `&begin=${parseTimestamp(options.begin)}`;
+      }
+      if (options.range && (options.range.start || options.range.end)) {
+        requestOptions.headers = Object.assign({}, requestOptions.headers, {
+          Range: `bytes=${options.range.start || '0'}-${options.range.end || ''}`,
+        });
+      }
+      req = miniget(format.url, requestOptions);
+      req.on('response', res => {
+        if (stream.destroyed) { return; }
+        contentLength = contentLength || parseInt(res.headers['content-length']);
+      });
+      req.on('data', ondata);
+      pipeAndSetEvents(req, stream, shouldEnd);
+    }
+  }
+
+  stream._destroy = () => {
+    stream.destroyed = true;
+    req.destroy();
+    req.end();
+  };
+};
+
+
+/**
+ * Can be used to download video after its `info` is gotten through
+ * `ytdl.getInfo()`. In case the user might want to look at the
+ * `info` object before deciding to download.
+ *
+ * @param {Object} info
+ * @param {!Object} options
+ * @returns {ReadableStream}
+ */
+ytdl.downloadFromInfo = (info, options) => {
+  const stream = createStream(options);
+  if (!info.full) {
+    throw Error('Cannot use `ytdl.downloadFromInfo()` when called ' +
+      'with info from `ytdl.getBasicInfo()`');
+  }
+  setImmediate(() => {
+    downloadFromInfoCallback(stream, info, options);
+  });
+  return stream;
+};
+
+}).call(this)}).call(this,require("timers").setImmediate)
+},{"../package.json":74,"./format-utils":65,"./info":69,"./sig":70,"./url-utils":71,"./utils":72,"m3u8stream":2,"miniget":73,"stream":23,"timers":59}],68:[function(require,module,exports){
+const utils = require('./utils');
+const qs = require('querystring');
+const { parseTimestamp } = require('m3u8stream');
+
+
+const BASE_URL = 'https://www.youtube.com/watch?v=';
+const TITLE_TO_CATEGORY = {
+  song: { name: 'Music', url: 'https://music.youtube.com/' },
+};
+
+const getText = obj => obj ? obj.runs ? obj.runs[0].text : obj.simpleText : null;
+
+
+/**
+ * Get video media.
+ *
+ * @param {Object} info
+ * @returns {Object}
+ */
+exports.getMedia = info => {
+  let media = {};
+  let results = [];
+  try {
+    results = info.response.contents.twoColumnWatchNextResults.results.results.contents;
+  } catch (err) {
+    // Do nothing
+  }
+
+  let result = results.find(v => v.videoSecondaryInfoRenderer);
+  if (!result) { return {}; }
+
+  try {
+    let metadataRows =
+      (result.metadataRowContainer || result.videoSecondaryInfoRenderer.metadataRowContainer)
+        .metadataRowContainerRenderer.rows;
+    for (let row of metadataRows) {
+      if (row.metadataRowRenderer) {
+        let title = getText(row.metadataRowRenderer.title).toLowerCase();
+        let contents = row.metadataRowRenderer.contents[0];
+        media[title] = getText(contents);
+        let runs = contents.runs;
+        if (runs && runs[0].navigationEndpoint) {
+          media[`${title}_url`] = new URL(
+            runs[0].navigationEndpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
+        }
+        if (title in TITLE_TO_CATEGORY) {
+          media.category = TITLE_TO_CATEGORY[title].name;
+          media.category_url = TITLE_TO_CATEGORY[title].url;
+        }
+      } else if (row.richMetadataRowRenderer) {
+        let contents = row.richMetadataRowRenderer.contents;
+        let boxArt = contents
+          .filter(meta => meta.richMetadataRenderer.style === 'RICH_METADATA_RENDERER_STYLE_BOX_ART');
+        for (let { richMetadataRenderer } of boxArt) {
+          let meta = richMetadataRenderer;
+          media.year = getText(meta.subtitle);
+          let type = getText(meta.callToAction).split(' ')[1];
+          media[type] = getText(meta.title);
+          media[`${type}_url`] = new URL(
+            meta.endpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
+          media.thumbnails = meta.thumbnail.thumbnails;
+        }
+        let topic = contents
+          .filter(meta => meta.richMetadataRenderer.style === 'RICH_METADATA_RENDERER_STYLE_TOPIC');
+        for (let { richMetadataRenderer } of topic) {
+          let meta = richMetadataRenderer;
+          media.category = getText(meta.title);
+          media.category_url = new URL(
+            meta.endpoint.commandMetadata.webCommandMetadata.url, BASE_URL).toString();
+        }
+      }
+    }
+  } catch (err) {
+    // Do nothing.
+  }
+
+  return media;
+};
+
+
+const isVerified = badges => !!(badges && badges.find(b => b.metadataBadgeRenderer.tooltip === 'Verified'));
+
+
+/**
+ * Get video author.
+ *
+ * @param {Object} info
+ * @returns {Object}
+ */
+exports.getAuthor = info => {
+  let channelId, thumbnails = [], subscriberCount, verified = false;
+  try {
+    let results = info.response.contents.twoColumnWatchNextResults.results.results.contents;
+    let v = results.find(v2 =>
+      v2.videoSecondaryInfoRenderer &&
+      v2.videoSecondaryInfoRenderer.owner &&
+      v2.videoSecondaryInfoRenderer.owner.videoOwnerRenderer);
+    let videoOwnerRenderer = v.videoSecondaryInfoRenderer.owner.videoOwnerRenderer;
+    channelId = videoOwnerRenderer.navigationEndpoint.browseEndpoint.browseId;
+    thumbnails = videoOwnerRenderer.thumbnail.thumbnails.map(thumbnail => {
+      thumbnail.url = new URL(thumbnail.url, BASE_URL).toString();
+      return thumbnail;
+    });
+    subscriberCount = utils.parseAbbreviatedNumber(getText(videoOwnerRenderer.subscriberCountText));
+    verified = isVerified(videoOwnerRenderer.badges);
+  } catch (err) {
+    // Do nothing.
+  }
+  try {
+    let videoDetails = info.player_response.microformat && info.player_response.microformat.playerMicroformatRenderer;
+    let id = (videoDetails && videoDetails.channelId) || channelId || info.player_response.videoDetails.channelId;
+    let author = {
+      id: id,
+      name: videoDetails ? videoDetails.ownerChannelName : info.player_response.videoDetails.author,
+      user: videoDetails ? videoDetails.ownerProfileUrl.split('/').slice(-1)[0] : null,
+      channel_url: `https://www.youtube.com/channel/${id}`,
+      external_channel_url: videoDetails ? `https://www.youtube.com/channel/${videoDetails.externalChannelId}` : '',
+      user_url: videoDetails ? new URL(videoDetails.ownerProfileUrl, BASE_URL).toString() : '',
+      thumbnails,
+      verified,
+      subscriber_count: subscriberCount,
+    };
+    if (thumbnails.length) {
+      utils.deprecate(author, 'avatar', author.thumbnails[0].url, 'author.avatar', 'author.thumbnails[0].url');
+    }
+    return author;
+  } catch (err) {
+    return {};
+  }
+};
+
+const parseRelatedVideo = (details, rvsParams) => {
+  if (!details) return;
+  try {
+    let viewCount = getText(details.viewCountText);
+    let shortViewCount = getText(details.shortViewCountText);
+    let rvsDetails = rvsParams.find(elem => elem.id === details.videoId);
+    if (!/^\d/.test(shortViewCount)) {
+      shortViewCount = (rvsDetails && rvsDetails.short_view_count_text) || '';
+    }
+    viewCount = (/^\d/.test(viewCount) ? viewCount : shortViewCount).split(' ')[0];
+    let browseEndpoint = details.shortBylineText.runs[0].navigationEndpoint.browseEndpoint;
+    let channelId = browseEndpoint.browseId;
+    let name = getText(details.shortBylineText);
+    let user = (browseEndpoint.canonicalBaseUrl || '').split('/').slice(-1)[0];
+    let video = {
+      id: details.videoId,
+      title: getText(details.title),
+      published: getText(details.publishedTimeText),
+      author: {
+        id: channelId,
+        name,
+        user,
+        channel_url: `https://www.youtube.com/channel/${channelId}`,
+        user_url: `https://www.youtube.com/user/${user}`,
+        thumbnails: details.channelThumbnail.thumbnails.map(thumbnail => {
+          thumbnail.url = new URL(thumbnail.url, BASE_URL).toString();
+          return thumbnail;
+        }),
+        verified: isVerified(details.ownerBadges),
+
+        [Symbol.toPrimitive]() {
+          console.warn(`\`relatedVideo.author\` will be removed in a near future release, ` +
+            `use \`relatedVideo.author.name\` instead.`);
+          return video.author.name;
+        },
+
+      },
+      short_view_count_text: shortViewCount.split(' ')[0],
+      view_count: viewCount.replace(/,/g, ''),
+      length_seconds: details.lengthText ?
+        Math.floor(parseTimestamp(getText(details.lengthText)) / 1000) :
+        rvsParams && `${rvsParams.length_seconds}`,
+      thumbnails: details.thumbnail.thumbnails,
+      richThumbnails:
+        details.richThumbnail ?
+          details.richThumbnail.movingThumbnailRenderer.movingThumbnailDetails.thumbnails : [],
+      isLive: !!(details.badges && details.badges.find(b => b.metadataBadgeRenderer.label === 'LIVE NOW')),
+    };
+
+    utils.deprecate(video, 'author_thumbnail', video.author.thumbnails[0].url,
+      'relatedVideo.author_thumbnail', 'relatedVideo.author.thumbnails[0].url');
+    utils.deprecate(video, 'ucid', video.author.id, 'relatedVideo.ucid', 'relatedVideo.author.id');
+    utils.deprecate(video, 'video_thumbnail', video.thumbnails[0].url,
+      'relatedVideo.video_thumbnail', 'relatedVideo.thumbnails[0].url');
+    return video;
+  } catch (err) {
+    // Skip.
+  }
+};
+
+/**
+ * Get related videos.
+ *
+ * @param {Object} info
+ * @returns {Array.<Object>}
+ */
+exports.getRelatedVideos = info => {
+  let rvsParams = [], secondaryResults = [];
+  try {
+    rvsParams = info.response.webWatchNextResponseExtensionData.relatedVideoArgs.split(',').map(e => qs.parse(e));
+  } catch (err) {
+    // Do nothing.
+  }
+  try {
+    secondaryResults = info.response.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results;
+  } catch (err) {
+    return [];
+  }
+  let videos = [];
+  for (let result of secondaryResults || []) {
+    let details = result.compactVideoRenderer;
+    if (details) {
+      let video = parseRelatedVideo(details, rvsParams);
+      if (video) videos.push(video);
+    } else {
+      let autoplay = result.compactAutoplayRenderer || result.itemSectionRenderer;
+      if (!autoplay || !Array.isArray(autoplay.contents)) continue;
+      for (let content of autoplay.contents) {
+        let video = parseRelatedVideo(content.compactVideoRenderer, rvsParams);
+        if (video) videos.push(video);
+      }
+    }
+  }
+  return videos;
+};
+
+/**
+ * Get like count.
+ *
+ * @param {Object} info
+ * @returns {number}
+ */
+exports.getLikes = info => {
+  try {
+    let contents = info.response.contents.twoColumnWatchNextResults.results.results.contents;
+    let video = contents.find(r => r.videoPrimaryInfoRenderer);
+    let buttons = video.videoPrimaryInfoRenderer.videoActions.menuRenderer.topLevelButtons;
+    let like = buttons.find(b => b.toggleButtonRenderer &&
+      b.toggleButtonRenderer.defaultIcon.iconType === 'LIKE');
+    return parseInt(like.toggleButtonRenderer.defaultText.accessibility.accessibilityData.label.replace(/\D+/g, ''));
+  } catch (err) {
+    return null;
+  }
+};
+
+/**
+ * Get dislike count.
+ *
+ * @param {Object} info
+ * @returns {number}
+ */
+exports.getDislikes = info => {
+  try {
+    let contents = info.response.contents.twoColumnWatchNextResults.results.results.contents;
+    let video = contents.find(r => r.videoPrimaryInfoRenderer);
+    let buttons = video.videoPrimaryInfoRenderer.videoActions.menuRenderer.topLevelButtons;
+    let dislike = buttons.find(b => b.toggleButtonRenderer &&
+      b.toggleButtonRenderer.defaultIcon.iconType === 'DISLIKE');
+    return parseInt(dislike.toggleButtonRenderer.defaultText.accessibility.accessibilityData.label.replace(/\D+/g, ''));
+  } catch (err) {
+    return null;
+  }
+};
+
+/**
+ * Cleans up a few fields on `videoDetails`.
+ *
+ * @param {Object} videoDetails
+ * @param {Object} info
+ * @returns {Object}
+ */
+exports.cleanVideoDetails = (videoDetails, info) => {
+  videoDetails.thumbnails = videoDetails.thumbnail.thumbnails;
+  delete videoDetails.thumbnail;
+  utils.deprecate(videoDetails, 'thumbnail', { thumbnails: videoDetails.thumbnails },
+    'videoDetails.thumbnail.thumbnails', 'videoDetails.thumbnails');
+  videoDetails.description = videoDetails.shortDescription || getText(videoDetails.description);
+  delete videoDetails.shortDescription;
+  utils.deprecate(videoDetails, 'shortDescription', videoDetails.description,
+    'videoDetails.shortDescription', 'videoDetails.description');
+
+  // Use more reliable `lengthSeconds` from `playerMicroformatRenderer`.
+  videoDetails.lengthSeconds =
+    info.player_response.microformat &&
+    info.player_response.microformat.playerMicroformatRenderer.lengthSeconds;
+  return videoDetails;
+};
+
+/**
+ * Get storyboards info.
+ *
+ * @param {Object} info
+ * @returns {Array.<Object>}
+ */
+exports.getStoryboards = info => {
+  const parts = info.player_response.storyboards &&
+    info.player_response.storyboards.playerStoryboardSpecRenderer &&
+    info.player_response.storyboards.playerStoryboardSpecRenderer.spec &&
+    info.player_response.storyboards.playerStoryboardSpecRenderer.spec.split('|');
+
+  if (!parts) return [];
+
+  const url = new URL(parts.shift());
+
+  return parts.map((part, i) => {
+    let [
+      thumbnailWidth,
+      thumbnailHeight,
+      thumbnailCount,
+      columns,
+      rows,
+      interval,
+      nameReplacement,
+      sigh,
+    ] = part.split('#');
+
+    url.searchParams.set('sigh', sigh);
+
+    thumbnailCount = parseInt(thumbnailCount, 10);
+    columns = parseInt(columns, 10);
+    rows = parseInt(rows, 10);
+
+    const storyboardCount = Math.ceil(thumbnailCount / (columns * rows));
+
+    return {
+      templateUrl: url.toString().replace('$L', i).replace('$N', nameReplacement),
+      thumbnailWidth: parseInt(thumbnailWidth, 10),
+      thumbnailHeight: parseInt(thumbnailHeight, 10),
+      thumbnailCount,
+      interval: parseInt(interval, 10),
+      columns,
+      rows,
+      storyboardCount,
+    };
+  });
+};
+
+/**
+ * Get chapters info.
+ *
+ * @param {Object} info
+ * @returns {Array.<Object>}
+ */
+exports.getChapters = info => {
+  const playerOverlayRenderer = info.response &&
+    info.response.playerOverlays &&
+    info.response.playerOverlays.playerOverlayRenderer;
+  const playerBar = playerOverlayRenderer &&
+    playerOverlayRenderer.decoratedPlayerBarRenderer &&
+    playerOverlayRenderer.decoratedPlayerBarRenderer.decoratedPlayerBarRenderer &&
+    playerOverlayRenderer.decoratedPlayerBarRenderer.decoratedPlayerBarRenderer.playerBar;
+  const markersMap = playerBar &&
+    playerBar.multiMarkersPlayerBarRenderer &&
+    playerBar.multiMarkersPlayerBarRenderer.markersMap;
+  const marker = Array.isArray(markersMap) && markersMap.find(m => m.value && Array.isArray(m.value.chapters));
+  if (!marker) return [];
+  const chapters = marker.value.chapters;
+
+  return chapters.map(chapter => ({
+    title: getText(chapter.chapterRenderer.title),
+    start_time: chapter.chapterRenderer.timeRangeStartMillis / 1000,
+  }));
+};
+
+},{"./utils":72,"m3u8stream":2,"querystring":20}],69:[function(require,module,exports){
+const querystring = require('querystring');
+const sax = require('sax');
+const miniget = require('miniget');
+const utils = require('./utils');
+// Forces Node JS version of setTimeout for Electron based applications
+const { setTimeout } = require('timers');
+const formatUtils = require('./format-utils');
+const urlUtils = require('./url-utils');
+const extras = require('./info-extras');
+const sig = require('./sig');
+const Cache = require('./cache');
+
+
+const BASE_URL = 'https://www.youtube.com/watch?v=';
+
+
+// Cached for storing basic/full info.
+exports.cache = new Cache();
+exports.cookieCache = new Cache(1000 * 60 * 60 * 24);
+exports.watchPageCache = new Cache();
+
+
+// Special error class used to determine if an error is unrecoverable,
+// as in, ytdl-core should not try again to fetch the video metadata.
+// In this case, the video is usually unavailable in some way.
+class UnrecoverableError extends Error {}
+
+
+// List of URLs that show up in `notice_url` for age restricted videos.
+const AGE_RESTRICTED_URLS = [
+  'support.google.com/youtube/?p=age_restrictions',
+  'youtube.com/t/community_guidelines',
+];
+
+
+/**
+ * Gets info from a video without getting additional formats.
+ *
+ * @param {string} id
+ * @param {Object} options
+ * @returns {Promise<Object>}
+*/
+exports.getBasicInfo = async(id, options) => {
+  const retryOptions = Object.assign({}, miniget.defaultOptions, options.requestOptions);
+  options.requestOptions = Object.assign({}, options.requestOptions, {});
+  options.requestOptions.headers = Object.assign({},
+    {
+      // eslint-disable-next-line max-len
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36',
+    }, options.requestOptions.headers);
+  const validate = info => {
+    let playErr = utils.playError(info.player_response, ['ERROR'], UnrecoverableError);
+    let privateErr = privateVideoError(info.player_response);
+    if (playErr || privateErr) {
+      throw playErr || privateErr;
+    }
+    return info && info.player_response && (
+      info.player_response.streamingData || isRental(info.player_response) || isNotYetBroadcasted(info.player_response)
+    );
+  };
+  let info = await pipeline([id, options], validate, retryOptions, [
+    getWatchHTMLPage,
+    getWatchJSONPage,
+    getVideoInfoPage,
+  ]);
+
+  Object.assign(info, {
+    formats: parseFormats(info.player_response),
+    related_videos: extras.getRelatedVideos(info),
+  });
+
+  // Add additional properties to info.
+  const media = extras.getMedia(info);
+  const additional = {
+    author: extras.getAuthor(info),
+    media,
+    likes: extras.getLikes(info),
+    dislikes: extras.getDislikes(info),
+    age_restricted: !!(media && media.notice_url && AGE_RESTRICTED_URLS.some(url => media.notice_url.includes(url))),
+
+    // Give the standard link to the video.
+    video_url: BASE_URL + id,
+    storyboards: extras.getStoryboards(info),
+    chapters: extras.getChapters(info),
+  };
+
+  info.videoDetails = extras.cleanVideoDetails(Object.assign({},
+    info.player_response && info.player_response.microformat &&
+    info.player_response.microformat.playerMicroformatRenderer,
+    info.player_response && info.player_response.videoDetails, additional), info);
+
+  return info;
+};
+
+const privateVideoError = player_response => {
+  let playability = player_response && player_response.playabilityStatus;
+  if (playability && playability.status === 'LOGIN_REQUIRED' && playability.messages &&
+    playability.messages.filter(m => /This is a private video/.test(m)).length) {
+    return new UnrecoverableError(playability.reason || (playability.messages && playability.messages[0]));
+  } else {
+    return null;
+  }
+};
+
+
+const isRental = player_response => {
+  let playability = player_response.playabilityStatus;
+  return playability && playability.status === 'UNPLAYABLE' &&
+    playability.errorScreen && playability.errorScreen.playerLegacyDesktopYpcOfferRenderer;
+};
+
+
+const isNotYetBroadcasted = player_response => {
+  let playability = player_response.playabilityStatus;
+  return playability && playability.status === 'LIVE_STREAM_OFFLINE';
+};
+
+
+const getWatchHTMLURL = (id, options) => `${BASE_URL + id}&hl=${options.lang || 'en'}`;
+const getWatchHTMLPageBody = (id, options) => {
+  const url = getWatchHTMLURL(id, options);
+  return exports.watchPageCache.getOrSet(url, () => utils.exposedMiniget(url, options).text());
+};
+
+
+const EMBED_URL = 'https://www.youtube.com/embed/';
+const getEmbedPageBody = (id, options) => {
+  const embedUrl = `${EMBED_URL + id}?hl=${options.lang || 'en'}`;
+  return utils.exposedMiniget(embedUrl, options).text();
+};
+
+
+const getHTML5player = body => {
+  let html5playerRes =
+    /<script\s+src="([^"]+)"(?:\s+type="text\/javascript")?\s+name="player_ias\/base"\s*>|"jsUrl":"([^"]+)"/
+      .exec(body);
+  return html5playerRes ? html5playerRes[1] || html5playerRes[2] : null;
+};
+
+
+const getIdentityToken = (id, options, key, throwIfNotFound) =>
+  exports.cookieCache.getOrSet(key, async() => {
+    let page = await getWatchHTMLPageBody(id, options);
+    let match = page.match(/(["'])ID_TOKEN\1[:,]\s?"([^"]+)"/);
+    if (!match && throwIfNotFound) {
+      throw new UnrecoverableError('Cookie header used in request, but unable to find YouTube identity token');
+    }
+    return match && match[2];
+  });
+
+
+/**
+ * Goes through each endpoint in the pipeline, retrying on failure if the error is recoverable.
+ * If unable to succeed with one endpoint, moves onto the next one.
+ *
+ * @param {Array.<Object>} args
+ * @param {Function} validate
+ * @param {Object} retryOptions
+ * @param {Array.<Function>} endpoints
+ * @returns {[Object, Object, Object]}
+ */
+const pipeline = async(args, validate, retryOptions, endpoints) => {
+  let info;
+  for (let func of endpoints) {
+    try {
+      const newInfo = await retryFunc(func, args.concat([info]), retryOptions);
+      if (newInfo.player_response) {
+        newInfo.player_response.videoDetails = assign(
+          info && info.player_response && info.player_response.videoDetails,
+          newInfo.player_response.videoDetails);
+        newInfo.player_response = assign(info && info.player_response, newInfo.player_response);
+      }
+      info = assign(info, newInfo);
+      if (validate(info, false)) {
+        break;
+      }
+    } catch (err) {
+      if (err instanceof UnrecoverableError || func === endpoints[endpoints.length - 1]) {
+        throw err;
+      }
+      // Unable to find video metadata... so try next endpoint.
+    }
+  }
+  return info;
+};
+
+
+/**
+ * Like Object.assign(), but ignores `null` and `undefined` from `source`.
+ *
+ * @param {Object} target
+ * @param {Object} source
+ * @returns {Object}
+ */
+const assign = (target, source) => {
+  if (!target || !source) { return target || source; }
+  for (let [key, value] of Object.entries(source)) {
+    if (value !== null && value !== undefined) {
+      target[key] = value;
+    }
+  }
+  return target;
+};
+
+
+/**
+ * Given a function, calls it with `args` until it's successful,
+ * or until it encounters an unrecoverable error.
+ * Currently, any error from miniget is considered unrecoverable. Errors such as
+ * too many redirects, invalid URL, status code 404, status code 502.
+ *
+ * @param {Function} func
+ * @param {Array.<Object>} args
+ * @param {Object} options
+ * @param {number} options.maxRetries
+ * @param {Object} options.backoff
+ * @param {number} options.backoff.inc
+ */
+const retryFunc = async(func, args, options) => {
+  let currentTry = 0, result;
+  while (currentTry <= options.maxRetries) {
+    try {
+      result = await func(...args);
+      break;
+    } catch (err) {
+      if (err instanceof UnrecoverableError ||
+        (err instanceof miniget.MinigetError && err.statusCode < 500) || currentTry >= options.maxRetries) {
+        throw err;
+      }
+      let wait = Math.min(++currentTry * options.backoff.inc, options.backoff.max);
+      await new Promise(resolve => setTimeout(resolve, wait));
+    }
+  }
+  return result;
+};
+
+
+const jsonClosingChars = /^[)\]}'\s]+/;
+const parseJSON = (source, varName, json) => {
+  if (!json || typeof json === 'object') {
+    return json;
+  } else {
+    try {
+      json = json.replace(jsonClosingChars, '');
+      return JSON.parse(json);
+    } catch (err) {
+      throw Error(`Error parsing ${varName} in ${source}: ${err.message}`);
+    }
+  }
+};
+
+
+const findJSON = (source, varName, body, left, right, prependJSON) => {
+  let jsonStr = utils.between(body, left, right);
+  if (!jsonStr) {
+    throw Error(`Could not find ${varName} in ${source}`);
+  }
+  return parseJSON(source, varName, utils.cutAfterJSON(`${prependJSON}${jsonStr}`));
+};
+
+
+const findPlayerResponse = (source, info) => {
+  const player_response = info && (
+    (info.args && info.args.player_response) ||
+    info.player_response || info.playerResponse || info.embedded_player_response);
+  return parseJSON(source, 'player_response', player_response);
+};
+
+
+const getWatchJSONURL = (id, options) => `${getWatchHTMLURL(id, options)}&pbj=1`;
+const getWatchJSONPage = async(id, options) => {
+  const reqOptions = Object.assign({ headers: {} }, options.requestOptions);
+  let cookie = reqOptions.headers.Cookie || reqOptions.headers.cookie;
+  reqOptions.headers = Object.assign({
+    'x-youtube-client-name': '1',
+    'x-youtube-client-version': '2.20201203.06.00',
+    'x-youtube-identity-token': exports.cookieCache.get(cookie || 'browser') || '',
+  }, reqOptions.headers);
+
+  const setIdentityToken = async(key, throwIfNotFound) => {
+    if (reqOptions.headers['x-youtube-identity-token']) { return; }
+    reqOptions.headers['x-youtube-identity-token'] = await getIdentityToken(id, options, key, throwIfNotFound);
+  };
+
+  if (cookie) {
+    await setIdentityToken(cookie, true);
+  }
+
+  const jsonUrl = getWatchJSONURL(id, options);
+  const body = await utils.exposedMiniget(jsonUrl, options, reqOptions).text();
+  let parsedBody = parseJSON('watch.json', 'body', body);
+  if (parsedBody.reload === 'now') {
+    await setIdentityToken('browser', false);
+  }
+  if (parsedBody.reload === 'now' || !Array.isArray(parsedBody)) {
+    throw Error('Unable to retrieve video metadata in watch.json');
+  }
+  let info = parsedBody.reduce((part, curr) => Object.assign(curr, part), {});
+  info.player_response = findPlayerResponse('watch.json', info);
+  info.html5player = info.player && info.player.assets && info.player.assets.js;
+
+  return info;
+};
+
+
+const getWatchHTMLPage = async(id, options) => {
+  let body = await getWatchHTMLPageBody(id, options);
+  let info = { page: 'watch' };
+  try {
+    info.player_response = findJSON('watch.html', 'player_response',
+      body, /\bytInitialPlayerResponse\s*=\s*\{/i, '\n', '{');
+  } catch (err) {
+    let args = findJSON('watch.html', 'player_response', body, /\bytplayer\.config\s*=\s*{/, '</script>', '{');
+    info.player_response = findPlayerResponse('watch.html', args);
+  }
+  info.response = findJSON('watch.html', 'response', body, /\bytInitialData("\])?\s*=\s*\{/i, '\n', '{');
+  info.html5player = getHTML5player(body);
+  return info;
+};
+
+
+const INFO_HOST = 'www.youtube.com';
+const INFO_PATH = '/get_video_info';
+const VIDEO_EURL = 'https://youtube.googleapis.com/v/';
+const getVideoInfoPage = async(id, options) => {
+  const url = new URL(`https://${INFO_HOST}${INFO_PATH}`);
+  url.searchParams.set('video_id', id);
+  url.searchParams.set('eurl', VIDEO_EURL + id);
+  url.searchParams.set('ps', 'default');
+  url.searchParams.set('gl', 'US');
+  url.searchParams.set('hl', options.lang || 'en');
+  url.searchParams.set('html5', '1');
+  const body = await utils.exposedMiniget(url.toString(), options).text();
+  let info = querystring.parse(body);
+  info.player_response = findPlayerResponse('get_video_info', info);
+  return info;
+};
+
+
+/**
+ * @param {Object} player_response
+ * @returns {Array.<Object>}
+ */
+const parseFormats = player_response => {
+  let formats = [];
+  if (player_response && player_response.streamingData) {
+    formats = formats
+      .concat(player_response.streamingData.formats || [])
+      .concat(player_response.streamingData.adaptiveFormats || []);
+  }
+  return formats;
+};
+
+
+/**
+ * Gets info from a video additional formats and deciphered URLs.
+ *
+ * @param {string} id
+ * @param {Object} options
+ * @returns {Promise<Object>}
+ */
+exports.getInfo = async(id, options) => {
+  let info = await exports.getBasicInfo(id, options);
+  const hasManifest =
+    info.player_response && info.player_response.streamingData && (
+      info.player_response.streamingData.dashManifestUrl ||
+      info.player_response.streamingData.hlsManifestUrl
+    );
+  let funcs = [];
+  if (info.formats.length) {
+    info.html5player = info.html5player ||
+      getHTML5player(await getWatchHTMLPageBody(id, options)) || getHTML5player(await getEmbedPageBody(id, options));
+    if (!info.html5player) {
+      throw Error('Unable to find html5player file');
+    }
+    const html5player = new URL(info.html5player, BASE_URL).toString();
+    funcs.push(sig.decipherFormats(info.formats, html5player, options));
+  }
+  if (hasManifest && info.player_response.streamingData.dashManifestUrl) {
+    let url = info.player_response.streamingData.dashManifestUrl;
+    funcs.push(getDashManifest(url, options));
+  }
+  if (hasManifest && info.player_response.streamingData.hlsManifestUrl) {
+    let url = info.player_response.streamingData.hlsManifestUrl;
+    funcs.push(getM3U8(url, options));
+  }
+
+  let results = await Promise.all(funcs);
+  info.formats = Object.values(Object.assign({}, ...results));
+  info.formats = info.formats.map(formatUtils.addFormatMeta);
+  info.formats.sort(formatUtils.sortFormats);
+  info.full = true;
+  return info;
+};
+
+
+/**
+ * Gets additional DASH formats.
+ *
+ * @param {string} url
+ * @param {Object} options
+ * @returns {Promise<Array.<Object>>}
+ */
+const getDashManifest = (url, options) => new Promise((resolve, reject) => {
+  let formats = {};
+  const parser = sax.parser(false);
+  parser.onerror = reject;
+  let adaptationSet;
+  parser.onopentag = node => {
+    if (node.name === 'ADAPTATIONSET') {
+      adaptationSet = node.attributes;
+    } else if (node.name === 'REPRESENTATION') {
+      const itag = parseInt(node.attributes.ID);
+      if (!isNaN(itag)) {
+        formats[url] = Object.assign({
+          itag, url,
+          bitrate: parseInt(node.attributes.BANDWIDTH),
+          mimeType: `${adaptationSet.MIMETYPE}; codecs="${node.attributes.CODECS}"`,
+        }, node.attributes.HEIGHT ? {
+          width: parseInt(node.attributes.WIDTH),
+          height: parseInt(node.attributes.HEIGHT),
+          fps: parseInt(node.attributes.FRAMERATE),
+        } : {
+          audioSampleRate: node.attributes.AUDIOSAMPLINGRATE,
+        });
+      }
+    }
+  };
+  parser.onend = () => { resolve(formats); };
+  const req = utils.exposedMiniget(new URL(url, BASE_URL).toString(), options);
+  req.setEncoding('utf8');
+  req.on('error', reject);
+  req.on('data', chunk => { parser.write(chunk); });
+  req.on('end', parser.close.bind(parser));
+});
+
+
+/**
+ * Gets additional formats.
+ *
+ * @param {string} url
+ * @param {Object} options
+ * @returns {Promise<Array.<Object>>}
+ */
+const getM3U8 = async(url, options) => {
+  url = new URL(url, BASE_URL);
+  const body = await utils.exposedMiniget(url.toString(), options).text();
+  let formats = {};
+  body
+    .split('\n')
+    .filter(line => /^https?:\/\//.test(line))
+    .forEach(line => {
+      const itag = parseInt(line.match(/\/itag\/(\d+)\//)[1]);
+      formats[line] = { itag, url: line };
+    });
+  return formats;
+};
+
+
+// Cache get info functions.
+// In case a user wants to get a video's info before downloading.
+for (let funcName of ['getBasicInfo', 'getInfo']) {
+  /**
+   * @param {string} link
+   * @param {Object} options
+   * @returns {Promise<Object>}
+   */
+  const func = exports[funcName];
+  exports[funcName] = async(link, options = {}) => {
+    utils.checkForUpdates();
+    let id = await urlUtils.getVideoID(link);
+    const key = [funcName, id, options.lang].join('-');
+    return exports.cache.getOrSet(key, () => func(id, options));
+  };
+}
+
+
+// Export a few helpers.
+exports.validateID = urlUtils.validateID;
+exports.validateURL = urlUtils.validateURL;
+exports.getURLVideoID = urlUtils.getURLVideoID;
+exports.getVideoID = urlUtils.getVideoID;
+
+},{"./cache":64,"./format-utils":65,"./info-extras":68,"./sig":70,"./url-utils":71,"./utils":72,"miniget":73,"querystring":20,"sax":22,"timers":59}],70:[function(require,module,exports){
+const querystring = require('querystring');
+const Cache = require('./cache');
+const utils = require('./utils');
+
+
+// A shared cache to keep track of html5player.js tokens.
+exports.cache = new Cache();
+
+
+/**
+ * Extract signature deciphering tokens from html5player file.
+ *
+ * @param {string} html5playerfile
+ * @param {Object} options
+ * @returns {Promise<Array.<string>>}
+ */
+exports.getTokens = (html5playerfile, options) => exports.cache.getOrSet(html5playerfile, async() => {
+  const body = await utils.exposedMiniget(html5playerfile, options).text();
+  const tokens = exports.extractActions(body);
+  if (!tokens || !tokens.length) {
+    throw Error('Could not extract signature deciphering actions');
+  }
+  exports.cache.set(html5playerfile, tokens);
+  return tokens;
+});
+
+
+/**
+ * Decipher a signature based on action tokens.
+ *
+ * @param {Array.<string>} tokens
+ * @param {string} sig
+ * @returns {string}
+ */
+exports.decipher = (tokens, sig) => {
+  sig = sig.split('');
+  for (let i = 0, len = tokens.length; i < len; i++) {
+    let token = tokens[i], pos;
+    switch (token[0]) {
+      case 'r':
+        sig = sig.reverse();
+        break;
+      case 'w':
+        pos = ~~token.slice(1);
+        sig = swapHeadAndPosition(sig, pos);
+        break;
+      case 's':
+        pos = ~~token.slice(1);
+        sig = sig.slice(pos);
+        break;
+      case 'p':
+        pos = ~~token.slice(1);
+        sig.splice(0, pos);
+        break;
+    }
+  }
+  return sig.join('');
+};
+
+
+/**
+ * Swaps the first element of an array with one of given position.
+ *
+ * @param {Array.<Object>} arr
+ * @param {number} position
+ * @returns {Array.<Object>}
+ */
+const swapHeadAndPosition = (arr, position) => {
+  const first = arr[0];
+  arr[0] = arr[position % arr.length];
+  arr[position] = first;
+  return arr;
+};
+
+
+const jsVarStr = '[a-zA-Z_\\$][a-zA-Z_0-9]*';
+const jsSingleQuoteStr = `'[^'\\\\]*(:?\\\\[\\s\\S][^'\\\\]*)*'`;
+const jsDoubleQuoteStr = `"[^"\\\\]*(:?\\\\[\\s\\S][^"\\\\]*)*"`;
+const jsQuoteStr = `(?:${jsSingleQuoteStr}|${jsDoubleQuoteStr})`;
+const jsKeyStr = `(?:${jsVarStr}|${jsQuoteStr})`;
+const jsPropStr = `(?:\\.${jsVarStr}|\\[${jsQuoteStr}\\])`;
+const jsEmptyStr = `(?:''|"")`;
+const reverseStr = ':function\\(a\\)\\{' +
+  '(?:return )?a\\.reverse\\(\\)' +
+'\\}';
+const sliceStr = ':function\\(a,b\\)\\{' +
+  'return a\\.slice\\(b\\)' +
+'\\}';
+const spliceStr = ':function\\(a,b\\)\\{' +
+  'a\\.splice\\(0,b\\)' +
+'\\}';
+const swapStr = ':function\\(a,b\\)\\{' +
+  'var c=a\\[0\\];a\\[0\\]=a\\[b(?:%a\\.length)?\\];a\\[b(?:%a\\.length)?\\]=c(?:;return a)?' +
+'\\}';
+const actionsObjRegexp = new RegExp(
+  `var (${jsVarStr})=\\{((?:(?:${
+    jsKeyStr}${reverseStr}|${
+    jsKeyStr}${sliceStr}|${
+    jsKeyStr}${spliceStr}|${
+    jsKeyStr}${swapStr
+  }),?\\r?\\n?)+)\\};`);
+const actionsFuncRegexp = new RegExp(`${`function(?: ${jsVarStr})?\\(a\\)\\{` +
+    `a=a\\.split\\(${jsEmptyStr}\\);\\s*` +
+    `((?:(?:a=)?${jsVarStr}`}${
+  jsPropStr
+}\\(a,\\d+\\);)+)` +
+    `return a\\.join\\(${jsEmptyStr}\\)` +
+  `\\}`);
+const reverseRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${reverseStr}`, 'm');
+const sliceRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${sliceStr}`, 'm');
+const spliceRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${spliceStr}`, 'm');
+const swapRegexp = new RegExp(`(?:^|,)(${jsKeyStr})${swapStr}`, 'm');
+
+
+/**
+ * Extracts the actions that should be taken to decipher a signature.
+ *
+ * This searches for a function that performs string manipulations on
+ * the signature. We already know what the 3 possible changes to a signature
+ * are in order to decipher it. There is
+ *
+ * * Reversing the string.
+ * * Removing a number of characters from the beginning.
+ * * Swapping the first character with another position.
+ *
+ * Note, `Array#slice()` used to be used instead of `Array#splice()`,
+ * it's kept in case we encounter any older html5player files.
+ *
+ * After retrieving the function that does this, we can see what actions
+ * it takes on a signature.
+ *
+ * @param {string} body
+ * @returns {Array.<string>}
+ */
+exports.extractActions = body => {
+  const objResult = actionsObjRegexp.exec(body);
+  const funcResult = actionsFuncRegexp.exec(body);
+  if (!objResult || !funcResult) { return null; }
+
+  const obj = objResult[1].replace(/\$/g, '\\$');
+  const objBody = objResult[2].replace(/\$/g, '\\$');
+  const funcBody = funcResult[1].replace(/\$/g, '\\$');
+
+  let result = reverseRegexp.exec(objBody);
+  const reverseKey = result && result[1]
+    .replace(/\$/g, '\\$')
+    .replace(/\$|^'|^"|'$|"$/g, '');
+  result = sliceRegexp.exec(objBody);
+  const sliceKey = result && result[1]
+    .replace(/\$/g, '\\$')
+    .replace(/\$|^'|^"|'$|"$/g, '');
+  result = spliceRegexp.exec(objBody);
+  const spliceKey = result && result[1]
+    .replace(/\$/g, '\\$')
+    .replace(/\$|^'|^"|'$|"$/g, '');
+  result = swapRegexp.exec(objBody);
+  const swapKey = result && result[1]
+    .replace(/\$/g, '\\$')
+    .replace(/\$|^'|^"|'$|"$/g, '');
+
+  const keys = `(${[reverseKey, sliceKey, spliceKey, swapKey].join('|')})`;
+  const myreg = `(?:a=)?${obj
+  }(?:\\.${keys}|\\['${keys}'\\]|\\["${keys}"\\])` +
+    `\\(a,(\\d+)\\)`;
+  const tokenizeRegexp = new RegExp(myreg, 'g');
+  const tokens = [];
+  while ((result = tokenizeRegexp.exec(funcBody)) !== null) {
+    let key = result[1] || result[2] || result[3];
+    switch (key) {
+      case swapKey:
+        tokens.push(`w${result[4]}`);
+        break;
+      case reverseKey:
+        tokens.push('r');
+        break;
+      case sliceKey:
+        tokens.push(`s${result[4]}`);
+        break;
+      case spliceKey:
+        tokens.push(`p${result[4]}`);
+        break;
+    }
+  }
+  return tokens;
+};
+
+
+/**
+ * @param {Object} format
+ * @param {string} sig
+ */
+exports.setDownloadURL = (format, sig) => {
+  let decodedUrl;
+  if (format.url) {
+    decodedUrl = format.url;
+  } else {
+    return;
+  }
+
+  try {
+    decodedUrl = decodeURIComponent(decodedUrl);
+  } catch (err) {
+    return;
+  }
+
+  // Make some adjustments to the final url.
+  const parsedUrl = new URL(decodedUrl);
+
+  // This is needed for a speedier download.
+  // See https://github.com/fent/node-ytdl-core/issues/127
+  parsedUrl.searchParams.set('ratebypass', 'yes');
+
+  if (sig) {
+    // When YouTube provides a `sp` parameter the signature `sig` must go
+    // into the parameter it specifies.
+    // See https://github.com/fent/node-ytdl-core/issues/417
+    parsedUrl.searchParams.set(format.sp || 'signature', sig);
+  }
+
+  format.url = parsedUrl.toString();
+};
+
+
+/**
+ * Applies `sig.decipher()` to all format URL's.
+ *
+ * @param {Array.<Object>} formats
+ * @param {string} html5player
+ * @param {Object} options
+ */
+exports.decipherFormats = async(formats, html5player, options) => {
+  let decipheredFormats = {};
+  let tokens = await exports.getTokens(html5player, options);
+  formats.forEach(format => {
+    let cipher = format.signatureCipher || format.cipher;
+    if (cipher) {
+      Object.assign(format, querystring.parse(cipher));
+      delete format.signatureCipher;
+      delete format.cipher;
+    }
+    const sig = tokens && format.s ? exports.decipher(tokens, format.s) : null;
+    exports.setDownloadURL(format, sig);
+    decipheredFormats[format.url] = format;
+  });
+  return decipheredFormats;
+};
+
+},{"./cache":64,"./utils":72,"querystring":20}],71:[function(require,module,exports){
+/**
+ * Get video ID.
+ *
+ * There are a few type of video URL formats.
+ *  - https://www.youtube.com/watch?v=VIDEO_ID
+ *  - https://m.youtube.com/watch?v=VIDEO_ID
+ *  - https://youtu.be/VIDEO_ID
+ *  - https://www.youtube.com/v/VIDEO_ID
+ *  - https://www.youtube.com/embed/VIDEO_ID
+ *  - https://music.youtube.com/watch?v=VIDEO_ID
+ *  - https://gaming.youtube.com/watch?v=VIDEO_ID
+ *
+ * @param {string} link
+ * @return {string}
+ * @throws {Error} If unable to find a id
+ * @throws {TypeError} If videoid doesn't match specs
+ */
+const validQueryDomains = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'music.youtube.com',
+  'gaming.youtube.com',
+]);
+const validPathDomains = /^https?:\/\/(youtu\.be\/|(www\.)?youtube.com\/(embed|v|shorts)\/)/;
+exports.getURLVideoID = link => {
+  const parsed = new URL(link);
+  let id = parsed.searchParams.get('v');
+  if (validPathDomains.test(link) && !id) {
+    const paths = parsed.pathname.split('/');
+    id = paths[paths.length - 1];
+  } else if (parsed.hostname && !validQueryDomains.has(parsed.hostname)) {
+    throw Error('Not a YouTube domain');
+  }
+  if (!id) {
+    throw Error(`No video id found: ${link}`);
+  }
+  id = id.substring(0, 11);
+  if (!exports.validateID(id)) {
+    throw TypeError(`Video id (${id}) does not match expected ` +
+      `format (${idRegex.toString()})`);
+  }
+  return id;
+};
+
+
+/**
+ * Gets video ID either from a url or by checking if the given string
+ * matches the video ID format.
+ *
+ * @param {string} str
+ * @returns {string}
+ * @throws {Error} If unable to find a id
+ * @throws {TypeError} If videoid doesn't match specs
+ */
+const urlRegex = /^https?:\/\//;
+exports.getVideoID = str => {
+  if (exports.validateID(str)) {
+    return str;
+  } else if (urlRegex.test(str)) {
+    return exports.getURLVideoID(str);
+  } else {
+    throw Error(`No video id found: ${str}`);
+  }
+};
+
+
+/**
+ * Returns true if given id satifies YouTube's id format.
+ *
+ * @param {string} id
+ * @return {boolean}
+ */
+const idRegex = /^[a-zA-Z0-9-_]{11}$/;
+exports.validateID = id => idRegex.test(id);
+
+
+/**
+ * Checks wether the input string includes a valid id.
+ *
+ * @param {string} string
+ * @returns {boolean}
+ */
+exports.validateURL = string => {
+  try {
+    exports.getURLVideoID(string);
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
+},{}],72:[function(require,module,exports){
+(function (process){(function (){
+const miniget = require('miniget');
+
+
+/**
+ * Extract string inbetween another.
+ *
+ * @param {string} haystack
+ * @param {string} left
+ * @param {string} right
+ * @returns {string}
+ */
+exports.between = (haystack, left, right) => {
+  let pos;
+  if (left instanceof RegExp) {
+    const match = haystack.match(left);
+    if (!match) { return ''; }
+    pos = match.index + match[0].length;
+  } else {
+    pos = haystack.indexOf(left);
+    if (pos === -1) { return ''; }
+    pos += left.length;
+  }
+  haystack = haystack.slice(pos);
+  pos = haystack.indexOf(right);
+  if (pos === -1) { return ''; }
+  haystack = haystack.slice(0, pos);
+  return haystack;
+};
+
+
+/**
+ * Get a number from an abbreviated number string.
+ *
+ * @param {string} string
+ * @returns {number}
+ */
+exports.parseAbbreviatedNumber = string => {
+  const match = string
+    .replace(',', '.')
+    .replace(' ', '')
+    .match(/([\d,.]+)([MK]?)/);
+  if (match) {
+    let [, num, multi] = match;
+    num = parseFloat(num);
+    return Math.round(multi === 'M' ? num * 1000000 :
+      multi === 'K' ? num * 1000 : num);
+  }
+  return null;
+};
+
+
+/**
+ * Match begin and end braces of input JSON, return only json
+ *
+ * @param {string} mixedJson
+ * @returns {string}
+*/
+exports.cutAfterJSON = mixedJson => {
+  let open, close;
+  if (mixedJson[0] === '[') {
+    open = '[';
+    close = ']';
+  } else if (mixedJson[0] === '{') {
+    open = '{';
+    close = '}';
+  }
+
+  if (!open) {
+    throw new Error(`Can't cut unsupported JSON (need to begin with [ or { ) but got: ${mixedJson[0]}`);
+  }
+
+  // States if the loop is currently in a string
+  let isString = false;
+
+  // States if the current character is treated as escaped or not
+  let isEscaped = false;
+
+  // Current open brackets to be closed
+  let counter = 0;
+
+  let i;
+  for (i = 0; i < mixedJson.length; i++) {
+    // Toggle the isString boolean when leaving/entering string
+    if (mixedJson[i] === '"' && !isEscaped) {
+      isString = !isString;
+      continue;
+    }
+
+    // Toggle the isEscaped boolean for every backslash
+    // Reset for every regular character
+    isEscaped = mixedJson[i] === '\\' && !isEscaped;
+
+    if (isString) continue;
+
+    if (mixedJson[i] === open) {
+      counter++;
+    } else if (mixedJson[i] === close) {
+      counter--;
+    }
+
+    // All brackets have been closed, thus end of JSON is reached
+    if (counter === 0) {
+      // Return the cut JSON
+      return mixedJson.substr(0, i + 1);
+    }
+  }
+
+  // We ran through the whole string and ended up with an unclosed bracket
+  throw Error("Can't cut unsupported JSON (no matching closing bracket found)");
+};
+
+
+/**
+ * Checks if there is a playability error.
+ *
+ * @param {Object} player_response
+ * @param {Array.<string>} statuses
+ * @param {Error} ErrorType
+ * @returns {!Error}
+ */
+exports.playError = (player_response, statuses, ErrorType = Error) => {
+  let playability = player_response && player_response.playabilityStatus;
+  if (playability && statuses.includes(playability.status)) {
+    return new ErrorType(playability.reason || (playability.messages && playability.messages[0]));
+  }
+  return null;
+};
+
+/**
+ * Does a miniget request and calls options.requestCallback if present
+ *
+ * @param {string} url the request url
+ * @param {Object} options an object with optional requestOptions and requestCallback parameters
+ * @param {Object} requestOptionsOverwrite overwrite of options.requestOptions
+ * @returns {miniget.Stream}
+ */
+exports.exposedMiniget = (url, options = {}, requestOptionsOverwrite) => {
+  const req = miniget(url, requestOptionsOverwrite || options.requestOptions);
+  if (typeof options.requestCallback === 'function') options.requestCallback(req);
+  return req;
+};
+
+/**
+ * Temporary helper to help deprecating a few properties.
+ *
+ * @param {Object} obj
+ * @param {string} prop
+ * @param {Object} value
+ * @param {string} oldPath
+ * @param {string} newPath
+ */
+exports.deprecate = (obj, prop, value, oldPath, newPath) => {
+  Object.defineProperty(obj, prop, {
+    get: () => {
+      console.warn(`\`${oldPath}\` will be removed in a near future release, ` +
+        `use \`${newPath}\` instead.`);
+      return value;
+    },
+  });
+};
+
+
+// Check for updates.
+const pkg = require('../package.json');
+const UPDATE_INTERVAL = 1000 * 60 * 60 * 12;
+exports.lastUpdateCheck = 0;
+exports.checkForUpdates = () => {
+  if (!process.env.YTDL_NO_UPDATE && !pkg.version.startsWith('0.0.0-') &&
+    Date.now() - exports.lastUpdateCheck >= UPDATE_INTERVAL) {
+    exports.lastUpdateCheck = Date.now();
+    return miniget('https://api.github.com/repos/fent/node-ytdl-core/releases/latest', {
+      headers: { 'User-Agent': 'ytdl-core' },
+    }).text().then(response => {
+      if (JSON.parse(response).tag_name !== `v${pkg.version}`) {
+        console.warn('\x1b[33mWARNING:\x1B[0m ytdl-core is out of date! Update with "npm install ytdl-core@latest".');
+      }
+    }, err => {
+      console.warn('Error checking for updates:', err.message);
+      console.warn('You can disable this check by setting the `YTDL_NO_UPDATE` env variable.');
+    });
+  }
+  return null;
+};
+
+}).call(this)}).call(this,require('_process'))
+},{"../package.json":74,"_process":16,"miniget":73}],73:[function(require,module,exports){
+(function (process){(function (){
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
+const stream_1 = require("stream");
+const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
+const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
+const retryStatusCodes = new Set([429, 503]);
+// `request`, `response`, `abort`, left out, miniget will emit these.
+const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
+const responseEvents = ['aborted'];
+Miniget.MinigetError = class MinigetError extends Error {
+    constructor(message, statusCode) {
+        super(message);
+        this.statusCode = statusCode;
+    }
+};
+Miniget.defaultOptions = {
+    maxRedirects: 10,
+    maxRetries: 2,
+    maxReconnects: 0,
+    backoff: { inc: 100, max: 10000 },
+};
+function Miniget(url, options = {}) {
+    var _a;
+    const opts = Object.assign({}, Miniget.defaultOptions, options);
+    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
+    stream.destroyed = stream.aborted = false;
+    let activeRequest;
+    let activeResponse;
+    let activeDecodedStream;
+    let redirects = 0;
+    let retries = 0;
+    let retryTimeout;
+    let reconnects = 0;
+    let contentLength;
+    let acceptRanges = false;
+    let rangeStart = 0, rangeEnd;
+    let downloaded = 0;
+    // Check if this is a ranged request.
+    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
+        let r = /bytes=(\d+)-(\d+)?/.exec(`${opts.headers.Range}`);
+        if (r) {
+            rangeStart = parseInt(r[1], 10);
+            rangeEnd = parseInt(r[2], 10);
+        }
+    }
+    // Add `Accept-Encoding` header.
+    if (opts.acceptEncoding) {
+        opts.headers = Object.assign({
+            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', '),
+        }, opts.headers);
+    }
+    const downloadHasStarted = () => activeDecodedStream && downloaded > 0;
+    const downloadComplete = () => !acceptRanges || downloaded === contentLength;
+    const reconnect = (err) => {
+        activeDecodedStream = null;
+        retries = 0;
+        let inc = opts.backoff.inc;
+        let ms = Math.min(inc, opts.backoff.max);
+        retryTimeout = setTimeout(doDownload, ms);
+        stream.emit('reconnect', reconnects, err);
+    };
+    const reconnectIfEndedEarly = (err) => {
+        if (options.method !== 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
+            reconnect(err);
+            return true;
+        }
+        return false;
+    };
+    const retryRequest = (retryOptions) => {
+        if (stream.destroyed) {
+            return false;
+        }
+        if (downloadHasStarted()) {
+            return reconnectIfEndedEarly(retryOptions.err);
+        }
+        else if ((!retryOptions.err || retryOptions.err.message === 'ENOTFOUND') &&
+            retries++ < opts.maxRetries) {
+            let ms = retryOptions.retryAfter ||
+                Math.min(retries * opts.backoff.inc, opts.backoff.max);
+            retryTimeout = setTimeout(doDownload, ms);
+            stream.emit('retry', retries, retryOptions.err);
+            return true;
+        }
+        return false;
+    };
+    const forwardEvents = (ee, events) => {
+        for (let event of events) {
+            ee.on(event, stream.emit.bind(stream, event));
+        }
+    };
+    const doDownload = () => {
+        let parsed = {}, httpLib;
+        try {
+            let urlObj = typeof url === 'string' ? new URL(url) : url;
+            parsed = Object.assign({}, {
+                host: urlObj.host,
+                hostname: urlObj.hostname,
+                path: urlObj.pathname + urlObj.search + urlObj.hash,
+                port: urlObj.port,
+                protocol: urlObj.protocol,
+            });
+            if (urlObj.username) {
+                parsed.auth = `${urlObj.username}:${urlObj.password}`;
+            }
+            httpLib = httpLibs[String(parsed.protocol)];
+        }
+        catch (err) {
+            // Let the error be caught by the if statement below.
+        }
+        if (!httpLib) {
+            stream.emit('error', new Miniget.MinigetError(`Invalid URL: ${url}`));
+            return;
+        }
+        Object.assign(parsed, opts);
+        if (acceptRanges && downloaded > 0) {
+            let start = downloaded + rangeStart;
+            let end = rangeEnd || '';
+            parsed.headers = Object.assign({}, parsed.headers, {
+                Range: `bytes=${start}-${end}`,
+            });
+        }
+        if (opts.transform) {
+            try {
+                parsed = opts.transform(parsed);
+            }
+            catch (err) {
+                stream.emit('error', err);
+                return;
+            }
+            if (!parsed || parsed.protocol) {
+                httpLib = httpLibs[String(parsed === null || parsed === void 0 ? void 0 : parsed.protocol)];
+                if (!httpLib) {
+                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
+                    return;
+                }
+            }
+        }
+        const onError = (err) => {
+            if (stream.destroyed || stream.readableEnded) {
+                return;
+            }
+            // Needed for node v10.
+            if (stream._readableState.ended) {
+                return;
+            }
+            cleanup();
+            if (!retryRequest({ err })) {
+                stream.emit('error', err);
+            }
+            else {
+                activeRequest.removeListener('close', onRequestClose);
+            }
+        };
+        const onRequestClose = () => {
+            cleanup();
+            retryRequest({});
+        };
+        const cleanup = () => {
+            activeRequest.removeListener('close', onRequestClose);
+            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
+            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
+        };
+        const onData = (chunk) => { downloaded += chunk.length; };
+        const onEnd = () => {
+            cleanup();
+            if (!reconnectIfEndedEarly()) {
+                stream.end();
+            }
+        };
+        activeRequest = httpLib.request(parsed, (res) => {
+            // Needed for node v10, v12.
+            // istanbul ignore next
+            if (stream.destroyed) {
+                return;
+            }
+            if (redirectStatusCodes.has(res.statusCode)) {
+                if (redirects++ >= opts.maxRedirects) {
+                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
+                }
+                else {
+                    if (res.headers.location) {
+                        url = res.headers.location;
+                    }
+                    else {
+                        let err = new Miniget.MinigetError('Redirect status code given with no location', res.statusCode);
+                        stream.emit('error', err);
+                        cleanup();
+                        return;
+                    }
+                    setTimeout(doDownload, parseInt(res.headers['retry-after'] || '0', 10) * 1000);
+                    stream.emit('redirect', url);
+                }
+                cleanup();
+                return;
+                // Check for rate limiting.
+            }
+            else if (retryStatusCodes.has(res.statusCode)) {
+                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'] || '0', 10) })) {
+                    let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            else if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
+                let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                if (res.statusCode >= 500) {
+                    onError(err);
+                }
+                else {
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            activeDecodedStream = res;
+            if (opts.acceptEncoding && res.headers['content-encoding']) {
+                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
+                    let fn = opts.acceptEncoding[enc];
+                    if (fn) {
+                        activeDecodedStream = activeDecodedStream.pipe(fn());
+                        activeDecodedStream.on('error', onError);
+                    }
+                }
+            }
+            if (!contentLength) {
+                contentLength = parseInt(`${res.headers['content-length']}`, 10);
+                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
+                    contentLength > 0 && opts.maxReconnects > 0;
+            }
+            res.on('data', onData);
+            activeDecodedStream.on('end', onEnd);
+            activeDecodedStream.pipe(stream, { end: !acceptRanges });
+            activeResponse = res;
+            stream.emit('response', res);
+            res.on('error', onError);
+            forwardEvents(res, responseEvents);
+        });
+        activeRequest.on('error', onError);
+        activeRequest.on('close', onRequestClose);
+        forwardEvents(activeRequest, requestEvents);
+        if (stream.destroyed) {
+            streamDestroy(...destroyArgs);
+        }
+        stream.emit('request', activeRequest);
+        activeRequest.end();
+    };
+    stream.abort = (err) => {
+        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
+        stream.aborted = true;
+        stream.emit('abort');
+        stream.destroy(err);
+    };
+    let destroyArgs;
+    const streamDestroy = (err) => {
+        activeRequest.destroy(err);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
+        clearTimeout(retryTimeout);
+    };
+    stream._destroy = (...args) => {
+        stream.destroyed = true;
+        if (activeRequest) {
+            streamDestroy(...args);
+        }
+        else {
+            destroyArgs = args;
+        }
+    };
+    stream.text = () => new Promise((resolve, reject) => {
+        let body = '';
+        stream.setEncoding('utf8');
+        stream.on('data', chunk => body += chunk);
+        stream.on('end', () => resolve(body));
+        stream.on('error', reject);
+    });
+    process.nextTick(doDownload);
+    return stream;
+}
+module.exports = Miniget;
+
+}).call(this)}).call(this,require('_process'))
+},{"_process":16,"http":38,"https":13,"stream":23}],74:[function(require,module,exports){
+module.exports={
+  "name": "ytdl-core",
+  "description": "YouTube video downloader in pure javascript.",
+  "keywords": [
+    "youtube",
+    "video",
+    "download"
+  ],
+  "version": "4.8.2",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/fent/node-ytdl-core.git"
+  },
+  "author": "fent <fentbox@gmail.com> (https://github.com/fent)",
+  "contributors": [
+    "Tobias Kutscha (https://github.com/TimeForANinja)",
+    "Andrew Kelley (https://github.com/andrewrk)",
+    "Mauricio Allende (https://github.com/mallendeo)",
+    "Rodrigo Altamirano (https://github.com/raltamirano)",
+    "Jim Buck (https://github.com/JimmyBoh)"
+  ],
+  "main": "./lib/index.js",
+  "types": "./typings/index.d.ts",
+  "files": [
+    "lib",
+    "typings"
+  ],
+  "scripts": {
+    "test": "nyc --reporter=lcov --reporter=text-summary npm run test:unit",
+    "test:unit": "mocha --ignore test/irl-test.js test/*-test.js --timeout 4000",
+    "test:irl": "mocha --timeout 16000 test/irl-test.js",
+    "lint": "eslint ./",
+    "lint:fix": "eslint --fix ./",
+    "lint:typings": "tslint typings/index.d.ts",
+    "lint:typings:fix": "tslint --fix typings/index.d.ts"
+  },
+  "dependencies": {
+    "m3u8stream": "^0.8.3",
+    "miniget": "^4.0.0",
+    "sax": "^1.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^13.1.0",
+    "assert-diff": "^3.0.1",
+    "dtslint": "^3.6.14",
+    "eslint": "^6.8.0",
+    "mocha": "^7.0.0",
+    "muk-require": "^1.2.0",
+    "nock": "^13.0.4",
+    "nyc": "^15.0.0",
+    "sinon": "^9.0.0",
+    "stream-equal": "~1.1.0",
+    "typescript": "^3.9.7"
+  },
+  "engines": {
+    "node": ">=10"
+  },
+  "license": "MIT"
+}
+
 },{}],75:[function(require,module,exports){
 class KeyboardLooper {
     constructor(sampler, looper) {
@@ -14048,7 +14092,43 @@ class KeyboardLooper {
         this.mousedownListenerFn = (e) => this.mouseDown(e)
         this.looper = looper
         this.speeds = [4/9, 8/15, 2/3, 4/5, 1, 5/4, 3/2, 15/8, 9/4]
+        this.initDefaultKeymap();
         this.bind(sampler)
+    }
+
+    initDefaultKeymap() {
+        this.keymap = {
+            'ArrowUp': (e) => {
+                const delta = e.shiftKey ? 0.001 : e.ctrlKey ? 0.1 : 0.01;
+                this.sampler.vol += delta
+            },
+            'ArrowDown': (e) => {
+                const delta = e.shiftKey ? 0.001 : e.ctrlKey ? 0.1 : 0.01;
+                this.sampler.vol -= delta
+            },
+        }
+
+        for(const name of 'qwertyuiop') {
+            this.keymap[name] = (e) => {
+                //this.toggleLoop(name, this.sampler.curPos);
+                this.skipTo(name)
+            } 
+        }
+        for(let name of 'QWERTYUIOP') {
+            this.keymap[name] = (e) => {
+                name = name.toLowerCase()
+                if(!this.has(name) || this.hasComplete(name))
+                    this.initLoop(name, this.sampler.curPos);
+            } 
+        } 
+        for(const nSpeed in 'asdfghjkl') {
+            const name = 'asdfghjkl'.charAt(nSpeed)
+            this.keymap[name] = (e) => {
+                this.sampler.speed = this.speeds[nSpeed]
+            }
+        }
+
+        this.keymap['z'] = (e) => this.sampler.togglePitchShift()
     }
 
     has(name) { return !!this.loops[name] }
@@ -14107,25 +14187,11 @@ class KeyboardLooper {
     }
 
     keyDown(event) {
-        let name = event.key;
-        let stopPropagation = false;
-        if('qwertyuiop'.includes(name)) {
-            //this.toggleLoop(name, this.sampler.curPos);
-            this.skipTo(name)
-            stopPropagation = true
-        } else if('QWERTYUIOP'.includes(name)) {
-            name = name.toLowerCase()
-            if(!this.has(name) || this.hasComplete(name))
-                this.initLoop(name, this.sampler.curPos);
-            stopPropagation = true
-        } else if('asdfghjkl'.includes(name)) {
-            const nSpeed = 'asdfghjkl'.split('').indexOf(name)
-            this.sampler.speed = this.speeds[nSpeed]
-            stopPropagation = true
+        const name = event.key;
+        if(this.keymap.hasOwnProperty(name)) {
+            this.keymap[name](event);
+            event.stopImmediatePropagation()
         }
-        
-        if (stopPropagation)
-            event.stopImmediatePropagation();
     }
 
     mouseDown(event) {
@@ -14151,6 +14217,7 @@ class KeyboardLooper {
 }
 
 module.exports = KeyboardLooper
+
 },{}],76:[function(require,module,exports){
 const {rand, irand, CallableInstance} = require('./utils')
 
@@ -14179,11 +14246,15 @@ class Looper extends CallableInstance {
 
     run(name) {
         if(!this.isPlaying(name)) return
+        this.loops[name].fn();
         let delta = this.loops[name].fnDelta || 0.1;
         if (typeof delta === 'function') delta = this.loops[name].fnDelta()
+        if (typeof delta != 'number') {
+            console.log(`[${name}] delta is not a number: stopping`);
+            this.pause(name)
+        }
+        delta = Math.max(0.1, delta)
         console.log(`[${name}] next: ${delta}`);
-        this.loops[name].fn();
-        delta = (typeof delta != 'number') ? 0.1 : Math.max(0.1, delta)
         clearInterval(this.loops[name].id)
         this.loops[name].id = setTimeout(()=>this.run(name), delta * 1000)
     }
@@ -14259,7 +14330,7 @@ for(const name of forwardLooper) { forwardFunc(window.l, name) }
 
 
 
-},{"./keyboard":75,"./looper":76,"./preloader":78,"./utils":79,"./youtubeFunctions":80,"stream-to-blob":68,"ytdl-core":4}],78:[function(require,module,exports){
+},{"./keyboard":75,"./looper":76,"./preloader":78,"./utils":79,"./youtubeFunctions":80,"stream-to-blob":57,"ytdl-core":67}],78:[function(require,module,exports){
 const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
 const {CallableInstance} = require('./utils')
@@ -14359,7 +14430,7 @@ class VideoPreloader extends CallableInstance{
 
 module.exports = VideoPreloader;
 
-},{"./utils":79,"stream-to-blob":68,"ytdl-core":4}],79:[function(require,module,exports){
+},{"./utils":79,"stream-to-blob":57,"ytdl-core":67}],79:[function(require,module,exports){
 const rand = (lo = 0, hi = 1) => Math.random() * (hi -lo) + lo
 const irand = (lo = 0, hi = 1) => Math.round(Math.random() * (hi -lo) + lo)
 const coin = (prob = 0.5) => Math.random() < prob
@@ -14419,6 +14490,23 @@ class YoutubePlayer {
         }
     }
     ps(activate = true) { this.pitchShift(activate) }
+
+    togglePitchShift() {
+        const video = this.v;
+        if (video.preservesPitch != undefined) { 
+            video.preservesPitch = !video.preservesPitch
+        } else if (video.mozPreservesPitch != undefined) {
+            video.mozPreservesPitch = !video.mozPreservesPitch
+        } else if (video.webkitPreservesPitch != undefined) {
+            video.webkitPreservesPitch = !video.webkitPreservesPitch
+        } else {
+            console.warn("[pitchShift] not supported by this browser")
+        }
+        
+    }
+
+    get vol() { return this.v.volume }
+    set vol(newVol) { this.v.volume = newVol }
 
 }
 
