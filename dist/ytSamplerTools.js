@@ -1,2453 +1,4 @@
 (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const stream_1 = require("stream");
-const sax_1 = __importDefault(require("sax"));
-const parse_time_1 = require("./parse-time");
-/**
- * A wrapper around sax that emits segments.
- */
-class DashMPDParser extends stream_1.Writable {
-    constructor(targetID) {
-        super();
-        this._parser = sax_1.default.createStream(false, { lowercase: true });
-        this._parser.on('error', this.destroy.bind(this));
-        let lastTag;
-        let currtime = 0;
-        let seq = 0;
-        let segmentTemplate;
-        let timescale, offset, duration, baseURL;
-        let timeline = [];
-        let getSegments = false;
-        let gotSegments = false;
-        let isStatic;
-        let treeLevel;
-        let periodStart;
-        const tmpl = (str) => {
-            const context = {
-                RepresentationID: targetID,
-                Number: seq,
-                Time: currtime,
-            };
-            return str.replace(/\$(\w+)\$/g, (m, p1) => `${context[p1]}`);
-        };
-        this._parser.on('opentag', node => {
-            switch (node.name) {
-                case 'mpd':
-                    currtime =
-                        node.attributes.availabilitystarttime ?
-                            new Date(node.attributes.availabilitystarttime).getTime() : 0;
-                    isStatic = node.attributes.type !== 'dynamic';
-                    break;
-                case 'period':
-                    // Reset everything on <Period> tag.
-                    seq = 0;
-                    timescale = 1000;
-                    duration = 0;
-                    offset = 0;
-                    baseURL = [];
-                    treeLevel = 0;
-                    periodStart = parse_time_1.durationStr(node.attributes.start) || 0;
-                    break;
-                case 'segmentlist':
-                    seq = parseInt(node.attributes.startnumber) || seq;
-                    timescale = parseInt(node.attributes.timescale) || timescale;
-                    duration = parseInt(node.attributes.duration) || duration;
-                    offset = parseInt(node.attributes.presentationtimeoffset) || offset;
-                    break;
-                case 'segmenttemplate':
-                    segmentTemplate = node.attributes;
-                    seq = parseInt(node.attributes.startnumber) || seq;
-                    timescale = parseInt(node.attributes.timescale) || timescale;
-                    break;
-                case 'segmenttimeline':
-                case 'baseurl':
-                    lastTag = node.name;
-                    break;
-                case 's':
-                    timeline.push({
-                        duration: parseInt(node.attributes.d),
-                        repeat: parseInt(node.attributes.r),
-                        time: parseInt(node.attributes.t),
-                    });
-                    break;
-                case 'adaptationset':
-                case 'representation':
-                    treeLevel++;
-                    if (!targetID) {
-                        targetID = node.attributes.id;
-                    }
-                    getSegments = node.attributes.id === `${targetID}`;
-                    if (getSegments) {
-                        if (periodStart) {
-                            currtime += periodStart;
-                        }
-                        if (offset) {
-                            currtime -= offset / timescale * 1000;
-                        }
-                        this.emit('starttime', currtime);
-                    }
-                    break;
-                case 'initialization':
-                    if (getSegments) {
-                        this.emit('item', {
-                            url: baseURL.filter(s => !!s).join('') + node.attributes.sourceurl,
-                            seq: seq,
-                            init: true,
-                            duration: 0,
-                        });
-                    }
-                    break;
-                case 'segmenturl':
-                    if (getSegments) {
-                        gotSegments = true;
-                        let tl = timeline.shift();
-                        let segmentDuration = ((tl === null || tl === void 0 ? void 0 : tl.duration) || duration) / timescale * 1000;
-                        this.emit('item', {
-                            url: baseURL.filter(s => !!s).join('') + node.attributes.media,
-                            seq: seq++,
-                            duration: segmentDuration,
-                        });
-                        currtime += segmentDuration;
-                    }
-                    break;
-            }
-        });
-        const onEnd = () => {
-            if (isStatic) {
-                this.emit('endlist');
-            }
-            if (!getSegments) {
-                this.destroy(Error(`Representation '${targetID}' not found`));
-            }
-            else {
-                this.emit('end');
-            }
-        };
-        this._parser.on('closetag', tagName => {
-            switch (tagName) {
-                case 'adaptationset':
-                case 'representation':
-                    treeLevel--;
-                    if (segmentTemplate && timeline.length) {
-                        gotSegments = true;
-                        if (segmentTemplate.initialization) {
-                            this.emit('item', {
-                                url: baseURL.filter(s => !!s).join('') +
-                                    tmpl(segmentTemplate.initialization),
-                                seq: seq,
-                                init: true,
-                                duration: 0,
-                            });
-                        }
-                        for (let { duration: itemDuration, repeat, time } of timeline) {
-                            itemDuration = itemDuration / timescale * 1000;
-                            repeat = repeat || 1;
-                            currtime = time || currtime;
-                            for (let i = 0; i < repeat; i++) {
-                                this.emit('item', {
-                                    url: baseURL.filter(s => !!s).join('') +
-                                        tmpl(segmentTemplate.media),
-                                    seq: seq++,
-                                    duration: itemDuration,
-                                });
-                                currtime += itemDuration;
-                            }
-                        }
-                    }
-                    if (gotSegments) {
-                        this.emit('endearly');
-                        onEnd();
-                        this._parser.removeAllListeners();
-                        this.removeAllListeners('finish');
-                    }
-                    break;
-            }
-        });
-        this._parser.on('text', text => {
-            if (lastTag === 'baseurl') {
-                baseURL[treeLevel] = text;
-                lastTag = null;
-            }
-        });
-        this.on('finish', onEnd);
-    }
-    _write(chunk, encoding, callback) {
-        this._parser.write(chunk, encoding);
-        callback();
-    }
-}
-exports.default = DashMPDParser;
-
-},{"./parse-time":4,"sax":7,"stream":23}],2:[function(require,module,exports){
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-const stream_1 = require("stream");
-const miniget_1 = __importDefault(require("miniget"));
-const m3u8_parser_1 = __importDefault(require("./m3u8-parser"));
-const dash_mpd_parser_1 = __importDefault(require("./dash-mpd-parser"));
-const queue_1 = require("./queue");
-const parse_time_1 = require("./parse-time");
-/**
- * URL constructor
- *
- * For compatibility with browser and Node.js APIs
- * Checks the global window for a URL library, else defaults to the node.js module
- */
-const URL = typeof window !== 'undefined' ? window.URL : require('url').URL;
-const supportedParsers = {
-    m3u8: m3u8_parser_1.default,
-    'dash-mpd': dash_mpd_parser_1.default,
-};
-let m3u8stream = ((playlistURL, options = {}) => {
-    const stream = new stream_1.PassThrough();
-    const chunkReadahead = options.chunkReadahead || 3;
-    // 20 seconds.
-    const liveBuffer = options.liveBuffer || 20000;
-    const requestOptions = options.requestOptions;
-    const Parser = supportedParsers[options.parser || (/\.mpd$/.test(playlistURL) ? 'dash-mpd' : 'm3u8')];
-    if (!Parser) {
-        throw TypeError(`parser '${options.parser}' not supported`);
-    }
-    let begin = 0;
-    if (typeof options.begin !== 'undefined') {
-        begin = typeof options.begin === 'string' ?
-            parse_time_1.humanStr(options.begin) :
-            Math.max(options.begin - liveBuffer, 0);
-    }
-    const forwardEvents = (req) => {
-        for (let event of ['abort', 'request', 'response', 'redirect', 'retry', 'reconnect']) {
-            req.on(event, stream.emit.bind(stream, event));
-        }
-    };
-    let currSegment;
-    const streamQueue = new queue_1.Queue((req, callback) => {
-        currSegment = req;
-        // Count the size manually, since the `content-length` header is not
-        // always there.
-        let size = 0;
-        req.on('data', (chunk) => size += chunk.length);
-        req.pipe(stream, { end: false });
-        req.on('end', () => callback(null, size));
-    }, { concurrency: 1 });
-    let segmentNumber = 0;
-    let downloaded = 0;
-    const requestQueue = new queue_1.Queue((segment, callback) => {
-        let reqOptions = Object.assign({}, requestOptions);
-        if (segment.range) {
-            reqOptions.headers = Object.assign({}, reqOptions.headers, {
-                Range: `bytes=${segment.range.start}-${segment.range.end}`,
-            });
-        }
-        let targetUrl = new URL(segment.url, playlistURL).href;
-        let req = miniget_1.default(targetUrl, reqOptions);
-        req.on('error', callback);
-        forwardEvents(req);
-        streamQueue.push(req, (_, size) => {
-            downloaded += +size;
-            stream.emit('progress', {
-                num: ++segmentNumber,
-                size: size,
-                duration: segment.duration,
-                url: segment.url,
-            }, requestQueue.total, downloaded);
-            callback(null);
-        });
-    }, { concurrency: chunkReadahead });
-    const onError = (err) => {
-        if (ended) {
-            return;
-        }
-        stream.emit('error', err);
-        // Stop on any error.
-        stream.end();
-    };
-    // When to look for items again.
-    let refreshThreshold;
-    let minRefreshTime;
-    let refreshTimeout;
-    let fetchingPlaylist = true;
-    let ended = false;
-    let isStatic = false;
-    let lastRefresh;
-    const onQueuedEnd = (err) => {
-        currSegment = null;
-        if (err) {
-            onError(err);
-        }
-        else if (!fetchingPlaylist && !ended && !isStatic &&
-            requestQueue.tasks.length + requestQueue.active <= refreshThreshold) {
-            let ms = Math.max(0, minRefreshTime - (Date.now() - lastRefresh));
-            fetchingPlaylist = true;
-            refreshTimeout = setTimeout(refreshPlaylist, ms);
-        }
-        else if ((ended || isStatic) &&
-            !requestQueue.tasks.length && !requestQueue.active) {
-            stream.end();
-        }
-    };
-    let currPlaylist;
-    let lastSeq;
-    let starttime = 0;
-    const refreshPlaylist = () => {
-        lastRefresh = Date.now();
-        currPlaylist = miniget_1.default(playlistURL, requestOptions);
-        currPlaylist.on('error', onError);
-        forwardEvents(currPlaylist);
-        const parser = currPlaylist.pipe(new Parser(options.id));
-        parser.on('starttime', (a) => {
-            if (starttime) {
-                return;
-            }
-            starttime = a;
-            if (typeof options.begin === 'string' && begin >= 0) {
-                begin += starttime;
-            }
-        });
-        parser.on('endlist', () => { isStatic = true; });
-        parser.on('endearly', currPlaylist.unpipe.bind(currPlaylist, parser));
-        let addedItems = [];
-        const addItem = (item) => {
-            if (!item.init) {
-                if (item.seq <= lastSeq) {
-                    return;
-                }
-                lastSeq = item.seq;
-            }
-            begin = item.time;
-            requestQueue.push(item, onQueuedEnd);
-            addedItems.push(item);
-        };
-        let tailedItems = [], tailedItemsDuration = 0;
-        parser.on('item', (item) => {
-            let timedItem = Object.assign({ time: starttime }, item);
-            if (begin <= timedItem.time) {
-                addItem(timedItem);
-            }
-            else {
-                tailedItems.push(timedItem);
-                tailedItemsDuration += timedItem.duration;
-                // Only keep the last `liveBuffer` of items.
-                while (tailedItems.length > 1 &&
-                    tailedItemsDuration - tailedItems[0].duration > liveBuffer) {
-                    const lastItem = tailedItems.shift();
-                    tailedItemsDuration -= lastItem.duration;
-                }
-            }
-            starttime += timedItem.duration;
-        });
-        parser.on('end', () => {
-            currPlaylist = null;
-            // If we are too ahead of the stream, make sure to get the
-            // latest available items with a small buffer.
-            if (!addedItems.length && tailedItems.length) {
-                tailedItems.forEach(item => { addItem(item); });
-            }
-            // Refresh the playlist when remaining segments get low.
-            refreshThreshold = Math.max(1, Math.ceil(addedItems.length * 0.01));
-            // Throttle refreshing the playlist by looking at the duration
-            // of live items added on this refresh.
-            minRefreshTime =
-                addedItems.reduce((total, item) => item.duration + total, 0);
-            fetchingPlaylist = false;
-            onQueuedEnd(null);
-        });
-    };
-    refreshPlaylist();
-    stream.end = () => {
-        ended = true;
-        streamQueue.die();
-        requestQueue.die();
-        clearTimeout(refreshTimeout);
-        currPlaylist === null || currPlaylist === void 0 ? void 0 : currPlaylist.destroy();
-        currSegment === null || currSegment === void 0 ? void 0 : currSegment.destroy();
-        stream_1.PassThrough.prototype.end.call(stream, null);
-    };
-    return stream;
-});
-m3u8stream.parseTimestamp = parse_time_1.humanStr;
-module.exports = m3u8stream;
-
-},{"./dash-mpd-parser":1,"./m3u8-parser":3,"./parse-time":4,"./queue":5,"miniget":6,"stream":23,"url":60}],3:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const stream_1 = require("stream");
-/**
- * A very simple m3u8 playlist file parser that detects tags and segments.
- */
-class m3u8Parser extends stream_1.Writable {
-    constructor() {
-        super();
-        this._lastLine = '';
-        this._seq = 0;
-        this._nextItemDuration = null;
-        this._nextItemRange = null;
-        this._lastItemRangeEnd = 0;
-        this.on('finish', () => {
-            this._parseLine(this._lastLine);
-            this.emit('end');
-        });
-    }
-    _parseAttrList(value) {
-        let attrs = {};
-        let regex = /([A-Z0-9-]+)=(?:"([^"]*?)"|([^,]*?))/g;
-        let match;
-        while ((match = regex.exec(value)) !== null) {
-            attrs[match[1]] = match[2] || match[3];
-        }
-        return attrs;
-    }
-    _parseRange(value) {
-        if (!value)
-            return null;
-        let svalue = value.split('@');
-        let start = svalue[1] ? parseInt(svalue[1]) : this._lastItemRangeEnd + 1;
-        let end = start + parseInt(svalue[0]) - 1;
-        let range = { start, end };
-        this._lastItemRangeEnd = range.end;
-        return range;
-    }
-    _parseLine(line) {
-        let match = line.match(/^#(EXT[A-Z0-9-]+)(?::(.*))?/);
-        if (match) {
-            // This is a tag.
-            const tag = match[1];
-            const value = match[2] || '';
-            switch (tag) {
-                case 'EXT-X-PROGRAM-DATE-TIME':
-                    this.emit('starttime', new Date(value).getTime());
-                    break;
-                case 'EXT-X-MEDIA-SEQUENCE':
-                    this._seq = parseInt(value);
-                    break;
-                case 'EXT-X-MAP': {
-                    let attrs = this._parseAttrList(value);
-                    if (!attrs.URI) {
-                        this.destroy(new Error('`EXT-X-MAP` found without required attribute `URI`'));
-                        return;
-                    }
-                    this.emit('item', {
-                        url: attrs.URI,
-                        seq: this._seq,
-                        init: true,
-                        duration: 0,
-                        range: this._parseRange(attrs.BYTERANGE),
-                    });
-                    break;
-                }
-                case 'EXT-X-BYTERANGE': {
-                    this._nextItemRange = this._parseRange(value);
-                    break;
-                }
-                case 'EXTINF':
-                    this._nextItemDuration =
-                        Math.round(parseFloat(value.split(',')[0]) * 1000);
-                    break;
-                case 'EXT-X-ENDLIST':
-                    this.emit('endlist');
-                    break;
-            }
-        }
-        else if (!/^#/.test(line) && line.trim()) {
-            // This is a segment
-            this.emit('item', {
-                url: line.trim(),
-                seq: this._seq++,
-                duration: this._nextItemDuration,
-                range: this._nextItemRange,
-            });
-            this._nextItemRange = null;
-        }
-    }
-    _write(chunk, encoding, callback) {
-        let lines = chunk.toString('utf8').split('\n');
-        if (this._lastLine) {
-            lines[0] = this._lastLine + lines[0];
-        }
-        lines.forEach((line, i) => {
-            if (this.destroyed)
-                return;
-            if (i < lines.length - 1) {
-                this._parseLine(line);
-            }
-            else {
-                // Save the last line in case it has been broken up.
-                this._lastLine = line;
-            }
-        });
-        callback();
-    }
-}
-exports.default = m3u8Parser;
-
-},{"stream":23}],4:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.durationStr = exports.humanStr = void 0;
-const numberFormat = /^\d+$/;
-const timeFormat = /^(?:(?:(\d+):)?(\d{1,2}):)?(\d{1,2})(?:\.(\d{3}))?$/;
-const timeUnits = {
-    ms: 1,
-    s: 1000,
-    m: 60000,
-    h: 3600000,
-};
-/**
- * Converts human friendly time to milliseconds. Supports the format
- * 00:00:00.000 for hours, minutes, seconds, and milliseconds respectively.
- * And 0ms, 0s, 0m, 0h, and together 1m1s.
- *
- * @param {number|string} time
- * @returns {number}
- */
-exports.humanStr = (time) => {
-    if (typeof time === 'number') {
-        return time;
-    }
-    if (numberFormat.test(time)) {
-        return +time;
-    }
-    const firstFormat = timeFormat.exec(time);
-    if (firstFormat) {
-        return (+(firstFormat[1] || 0) * timeUnits.h) +
-            (+(firstFormat[2] || 0) * timeUnits.m) +
-            (+firstFormat[3] * timeUnits.s) +
-            +(firstFormat[4] || 0);
-    }
-    else {
-        let total = 0;
-        const r = /(-?\d+)(ms|s|m|h)/g;
-        let rs;
-        while ((rs = r.exec(time)) !== null) {
-            total += +rs[1] * timeUnits[rs[2]];
-        }
-        return total;
-    }
-};
-/**
- * Parses a duration string in the form of "123.456S", returns milliseconds.
- *
- * @param {string} time
- * @returns {number}
- */
-exports.durationStr = (time) => {
-    let total = 0;
-    const r = /(\d+(?:\.\d+)?)(S|M|H)/g;
-    let rs;
-    while ((rs = r.exec(time)) !== null) {
-        total += +rs[1] * timeUnits[rs[2].toLowerCase()];
-    }
-    return total;
-};
-
-},{}],5:[function(require,module,exports){
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.Queue = void 0;
-class Queue {
-    /**
-     * A really simple queue with concurrency.
-     *
-     * @param {Function} worker
-     * @param {Object} options
-     * @param {!number} options.concurrency
-     */
-    constructor(worker, options = {}) {
-        this._worker = worker;
-        this._concurrency = options.concurrency || 1;
-        this.tasks = [];
-        this.total = 0;
-        this.active = 0;
-    }
-    /**
-     * Push a task to the queue.
-     *
-     *  @param {T} item
-     *  @param {!Function} callback
-     */
-    push(item, callback) {
-        this.tasks.push({ item, callback });
-        this.total++;
-        this._next();
-    }
-    /**
-     * Process next job in queue.
-     */
-    _next() {
-        if (this.active >= this._concurrency || !this.tasks.length) {
-            return;
-        }
-        const { item, callback } = this.tasks.shift();
-        let callbackCalled = false;
-        this.active++;
-        this._worker(item, (err, result) => {
-            if (callbackCalled) {
-                return;
-            }
-            this.active--;
-            callbackCalled = true;
-            callback === null || callback === void 0 ? void 0 : callback(err, result);
-            this._next();
-        });
-    }
-    /**
-     * Stops processing queued jobs.
-     */
-    die() {
-        this.tasks = [];
-    }
-}
-exports.Queue = Queue;
-
-},{}],6:[function(require,module,exports){
-(function (process){(function (){
-"use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-const http_1 = __importDefault(require("http"));
-const https_1 = __importDefault(require("https"));
-const url_1 = require("url");
-const stream_1 = require("stream");
-const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
-const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
-const retryStatusCodes = new Set([429, 503]);
-// `request`, `response`, `abort`, left out, miniget will emit these.
-const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
-const responseEvents = ['aborted'];
-Miniget.MinigetError = class MinigetError extends Error {
-    constructor(message, statusCode) {
-        super(message);
-        this.statusCode = statusCode;
-    }
-};
-Miniget.defaultOptions = {
-    maxRedirects: 10,
-    maxRetries: 2,
-    maxReconnects: 0,
-    backoff: { inc: 100, max: 10000 },
-};
-function Miniget(url, options = {}) {
-    var _a;
-    const opts = Object.assign({}, Miniget.defaultOptions, options);
-    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
-    stream.destroyed = stream.aborted = false;
-    let activeRequest;
-    let activeResponse;
-    let activeDecodedStream;
-    let redirects = 0;
-    let retries = 0;
-    let retryTimeout;
-    let reconnects = 0;
-    let contentLength;
-    let acceptRanges = false;
-    let rangeStart = 0, rangeEnd;
-    let downloaded = 0;
-    // Check if this is a ranged request.
-    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
-        let r = /bytes=(\d+)-(\d+)?/.exec(opts.headers.Range + '');
-        if (r) {
-            rangeStart = parseInt(r[1], 10);
-            rangeEnd = parseInt(r[2], 10);
-        }
-    }
-    // Add `Accept-Encoding` header.
-    if (opts.acceptEncoding) {
-        opts.headers = Object.assign({
-            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', ')
-        }, opts.headers);
-    }
-    const downloadHasStarted = () => activeDecodedStream && 0 < downloaded;
-    const downloadComplete = () => !acceptRanges || downloaded == contentLength;
-    const reconnect = (err) => {
-        activeDecodedStream = null;
-        retries = 0;
-        let inc = opts.backoff.inc;
-        let ms = Math.min(inc, opts.backoff.max);
-        retryTimeout = setTimeout(doDownload, ms);
-        stream.emit('reconnect', reconnects, err);
-    };
-    const reconnectIfEndedEarly = (err) => {
-        if (options.method != 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
-            reconnect(err);
-            return true;
-        }
-        return false;
-    };
-    const retryRequest = (retryOptions) => {
-        if (stream.destroyed) {
-            return false;
-        }
-        if (downloadHasStarted()) {
-            return reconnectIfEndedEarly(retryOptions.err);
-        }
-        else if ((!retryOptions.statusCode || retryOptions.err.message === 'ENOTFOUND') &&
-            retries++ < opts.maxRetries) {
-            let ms = retryOptions.retryAfter ||
-                Math.min(retries * opts.backoff.inc, opts.backoff.max);
-            retryTimeout = setTimeout(doDownload, ms);
-            stream.emit('retry', retries, retryOptions.err);
-            return true;
-        }
-        return false;
-    };
-    const forwardEvents = (ee, events) => {
-        for (let event of events) {
-            ee.on(event, stream.emit.bind(stream, event));
-        }
-    };
-    const doDownload = () => {
-        let parsed, httpLib;
-        try {
-            parsed = url_1.parse(url);
-            httpLib = httpLibs[parsed.protocol];
-        }
-        catch (err) {
-            // Let the error be caught by the if statement below.
-        }
-        if (!httpLib) {
-            stream.emit('error', new Miniget.MinigetError('Invalid URL: ' + url));
-            return;
-        }
-        Object.assign(parsed, opts);
-        if (acceptRanges && downloaded > 0) {
-            let start = downloaded + rangeStart;
-            let end = rangeEnd || '';
-            parsed.headers = Object.assign({}, parsed.headers, {
-                Range: `bytes=${start}-${end}`
-            });
-        }
-        if (opts.transform) {
-            try {
-                parsed = opts.transform(parsed);
-            }
-            catch (err) {
-                stream.emit('error', err);
-                return;
-            }
-            if (!parsed || parsed.protocol) {
-                httpLib = httpLibs[parsed === null || parsed === void 0 ? void 0 : parsed.protocol];
-                if (!httpLib) {
-                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
-                    return;
-                }
-            }
-        }
-        const onError = (err, statusCode) => {
-            cleanup();
-            if (!retryRequest({ err, statusCode })) {
-                stream.emit('error', err);
-            }
-            else {
-                activeRequest.removeListener('close', onRequestClose);
-            }
-        };
-        const onRequestClose = () => {
-            cleanup();
-            retryRequest({});
-        };
-        const cleanup = () => {
-            activeRequest.removeListener('error', onError);
-            activeRequest.removeListener('close', onRequestClose);
-            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
-            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
-            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('error', onError);
-            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('error', onError);
-        };
-        const onData = (chunk) => { downloaded += chunk.length; };
-        const onEnd = () => {
-            cleanup();
-            if (!reconnectIfEndedEarly()) {
-                stream.end();
-            }
-        };
-        activeRequest = httpLib.get(parsed, (res) => {
-            // Needed for node v10, v12.
-            // istanbul ignore next
-            if (stream.destroyed) {
-                return;
-            }
-            if (redirectStatusCodes.has(res.statusCode)) {
-                if (redirects++ >= opts.maxRedirects) {
-                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
-                }
-                else {
-                    url = res.headers.location;
-                    setTimeout(doDownload, res.headers['retry-after'] ? parseInt(res.headers['retry-after'], 10) * 1000 : 0);
-                    stream.emit('redirect', url);
-                }
-                return cleanup();
-                // Check for rate limiting.
-            }
-            else if (retryStatusCodes.has(res.statusCode)) {
-                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'], 10) })) {
-                    let err = new Miniget.MinigetError('Status code: ' + res.statusCode, res.statusCode);
-                    stream.emit('error', err);
-                }
-                return cleanup();
-            }
-            else if (res.statusCode < 200 || 400 <= res.statusCode) {
-                let err = new Miniget.MinigetError('Status code: ' + res.statusCode, res.statusCode);
-                if (res.statusCode >= 500) {
-                    onError(err, res.statusCode);
-                }
-                else {
-                    stream.emit('error', err);
-                }
-                return cleanup();
-            }
-            activeDecodedStream = res;
-            if (opts.acceptEncoding && res.headers['content-encoding']) {
-                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
-                    let fn = opts.acceptEncoding[enc];
-                    if (fn != null) {
-                        activeDecodedStream = activeDecodedStream.pipe(fn());
-                        activeDecodedStream.on('error', onError);
-                    }
-                }
-            }
-            if (!contentLength) {
-                contentLength = parseInt(res.headers['content-length'] + '', 10);
-                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
-                    contentLength > 0 && opts.maxReconnects > 0;
-            }
-            res.on('data', onData);
-            activeDecodedStream.on('end', onEnd);
-            activeDecodedStream.pipe(stream, { end: !acceptRanges });
-            activeResponse = res;
-            stream.emit('response', res);
-            res.on('error', onError);
-            forwardEvents(res, responseEvents);
-        });
-        activeRequest.on('error', onError);
-        activeRequest.on('close', onRequestClose);
-        forwardEvents(activeRequest, requestEvents);
-        if (stream.destroyed) {
-            streamDestroy(destroyErr);
-        }
-        stream.emit('request', activeRequest);
-    };
-    stream.abort = (err) => {
-        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
-        stream.aborted = true;
-        stream.emit('abort');
-        stream.destroy(err);
-    };
-    let destroyErr;
-    const streamDestroy = (err) => {
-        activeRequest.destroy(err);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
-        clearTimeout(retryTimeout);
-    };
-    stream._destroy = (err) => {
-        stream.destroyed = true;
-        if (activeRequest) {
-            streamDestroy(err);
-        }
-        else {
-            destroyErr = err;
-        }
-    };
-    stream.text = () => __awaiter(this, void 0, void 0, function* () {
-        return new Promise((resolve, reject) => {
-            let body = '';
-            stream.setEncoding('utf8');
-            stream.on('data', (chunk) => body += chunk);
-            stream.on('end', () => resolve(body));
-            stream.on('error', reject);
-        });
-    });
-    process.nextTick(doDownload);
-    return stream;
-}
-module.exports = Miniget;
-
-}).call(this)}).call(this,require('_process'))
-},{"_process":16,"http":38,"https":13,"stream":23,"url":60}],7:[function(require,module,exports){
-(function (Buffer){(function (){
-;(function (sax) { // wrapper for non-node envs
-  sax.parser = function (strict, opt) { return new SAXParser(strict, opt) }
-  sax.SAXParser = SAXParser
-  sax.SAXStream = SAXStream
-  sax.createStream = createStream
-
-  // When we pass the MAX_BUFFER_LENGTH position, start checking for buffer overruns.
-  // When we check, schedule the next check for MAX_BUFFER_LENGTH - (max(buffer lengths)),
-  // since that's the earliest that a buffer overrun could occur.  This way, checks are
-  // as rare as required, but as often as necessary to ensure never crossing this bound.
-  // Furthermore, buffers are only tested at most once per write(), so passing a very
-  // large string into write() might have undesirable effects, but this is manageable by
-  // the caller, so it is assumed to be safe.  Thus, a call to write() may, in the extreme
-  // edge case, result in creating at most one complete copy of the string passed in.
-  // Set to Infinity to have unlimited buffers.
-  sax.MAX_BUFFER_LENGTH = 64 * 1024
-
-  var buffers = [
-    'comment', 'sgmlDecl', 'textNode', 'tagName', 'doctype',
-    'procInstName', 'procInstBody', 'entity', 'attribName',
-    'attribValue', 'cdata', 'script'
-  ]
-
-  sax.EVENTS = [
-    'text',
-    'processinginstruction',
-    'sgmldeclaration',
-    'doctype',
-    'comment',
-    'opentagstart',
-    'attribute',
-    'opentag',
-    'closetag',
-    'opencdata',
-    'cdata',
-    'closecdata',
-    'error',
-    'end',
-    'ready',
-    'script',
-    'opennamespace',
-    'closenamespace'
-  ]
-
-  function SAXParser (strict, opt) {
-    if (!(this instanceof SAXParser)) {
-      return new SAXParser(strict, opt)
-    }
-
-    var parser = this
-    clearBuffers(parser)
-    parser.q = parser.c = ''
-    parser.bufferCheckPosition = sax.MAX_BUFFER_LENGTH
-    parser.opt = opt || {}
-    parser.opt.lowercase = parser.opt.lowercase || parser.opt.lowercasetags
-    parser.looseCase = parser.opt.lowercase ? 'toLowerCase' : 'toUpperCase'
-    parser.tags = []
-    parser.closed = parser.closedRoot = parser.sawRoot = false
-    parser.tag = parser.error = null
-    parser.strict = !!strict
-    parser.noscript = !!(strict || parser.opt.noscript)
-    parser.state = S.BEGIN
-    parser.strictEntities = parser.opt.strictEntities
-    parser.ENTITIES = parser.strictEntities ? Object.create(sax.XML_ENTITIES) : Object.create(sax.ENTITIES)
-    parser.attribList = []
-
-    // namespaces form a prototype chain.
-    // it always points at the current tag,
-    // which protos to its parent tag.
-    if (parser.opt.xmlns) {
-      parser.ns = Object.create(rootNS)
-    }
-
-    // mostly just for error reporting
-    parser.trackPosition = parser.opt.position !== false
-    if (parser.trackPosition) {
-      parser.position = parser.line = parser.column = 0
-    }
-    emit(parser, 'onready')
-  }
-
-  if (!Object.create) {
-    Object.create = function (o) {
-      function F () {}
-      F.prototype = o
-      var newf = new F()
-      return newf
-    }
-  }
-
-  if (!Object.keys) {
-    Object.keys = function (o) {
-      var a = []
-      for (var i in o) if (o.hasOwnProperty(i)) a.push(i)
-      return a
-    }
-  }
-
-  function checkBufferLength (parser) {
-    var maxAllowed = Math.max(sax.MAX_BUFFER_LENGTH, 10)
-    var maxActual = 0
-    for (var i = 0, l = buffers.length; i < l; i++) {
-      var len = parser[buffers[i]].length
-      if (len > maxAllowed) {
-        // Text/cdata nodes can get big, and since they're buffered,
-        // we can get here under normal conditions.
-        // Avoid issues by emitting the text node now,
-        // so at least it won't get any bigger.
-        switch (buffers[i]) {
-          case 'textNode':
-            closeText(parser)
-            break
-
-          case 'cdata':
-            emitNode(parser, 'oncdata', parser.cdata)
-            parser.cdata = ''
-            break
-
-          case 'script':
-            emitNode(parser, 'onscript', parser.script)
-            parser.script = ''
-            break
-
-          default:
-            error(parser, 'Max buffer length exceeded: ' + buffers[i])
-        }
-      }
-      maxActual = Math.max(maxActual, len)
-    }
-    // schedule the next check for the earliest possible buffer overrun.
-    var m = sax.MAX_BUFFER_LENGTH - maxActual
-    parser.bufferCheckPosition = m + parser.position
-  }
-
-  function clearBuffers (parser) {
-    for (var i = 0, l = buffers.length; i < l; i++) {
-      parser[buffers[i]] = ''
-    }
-  }
-
-  function flushBuffers (parser) {
-    closeText(parser)
-    if (parser.cdata !== '') {
-      emitNode(parser, 'oncdata', parser.cdata)
-      parser.cdata = ''
-    }
-    if (parser.script !== '') {
-      emitNode(parser, 'onscript', parser.script)
-      parser.script = ''
-    }
-  }
-
-  SAXParser.prototype = {
-    end: function () { end(this) },
-    write: write,
-    resume: function () { this.error = null; return this },
-    close: function () { return this.write(null) },
-    flush: function () { flushBuffers(this) }
-  }
-
-  var Stream
-  try {
-    Stream = require('stream').Stream
-  } catch (ex) {
-    Stream = function () {}
-  }
-
-  var streamWraps = sax.EVENTS.filter(function (ev) {
-    return ev !== 'error' && ev !== 'end'
-  })
-
-  function createStream (strict, opt) {
-    return new SAXStream(strict, opt)
-  }
-
-  function SAXStream (strict, opt) {
-    if (!(this instanceof SAXStream)) {
-      return new SAXStream(strict, opt)
-    }
-
-    Stream.apply(this)
-
-    this._parser = new SAXParser(strict, opt)
-    this.writable = true
-    this.readable = true
-
-    var me = this
-
-    this._parser.onend = function () {
-      me.emit('end')
-    }
-
-    this._parser.onerror = function (er) {
-      me.emit('error', er)
-
-      // if didn't throw, then means error was handled.
-      // go ahead and clear error, so we can write again.
-      me._parser.error = null
-    }
-
-    this._decoder = null
-
-    streamWraps.forEach(function (ev) {
-      Object.defineProperty(me, 'on' + ev, {
-        get: function () {
-          return me._parser['on' + ev]
-        },
-        set: function (h) {
-          if (!h) {
-            me.removeAllListeners(ev)
-            me._parser['on' + ev] = h
-            return h
-          }
-          me.on(ev, h)
-        },
-        enumerable: true,
-        configurable: false
-      })
-    })
-  }
-
-  SAXStream.prototype = Object.create(Stream.prototype, {
-    constructor: {
-      value: SAXStream
-    }
-  })
-
-  SAXStream.prototype.write = function (data) {
-    if (typeof Buffer === 'function' &&
-      typeof Buffer.isBuffer === 'function' &&
-      Buffer.isBuffer(data)) {
-      if (!this._decoder) {
-        var SD = require('string_decoder').StringDecoder
-        this._decoder = new SD('utf8')
-      }
-      data = this._decoder.write(data)
-    }
-
-    this._parser.write(data.toString())
-    this.emit('data', data)
-    return true
-  }
-
-  SAXStream.prototype.end = function (chunk) {
-    if (chunk && chunk.length) {
-      this.write(chunk)
-    }
-    this._parser.end()
-    return true
-  }
-
-  SAXStream.prototype.on = function (ev, handler) {
-    var me = this
-    if (!me._parser['on' + ev] && streamWraps.indexOf(ev) !== -1) {
-      me._parser['on' + ev] = function () {
-        var args = arguments.length === 1 ? [arguments[0]] : Array.apply(null, arguments)
-        args.splice(0, 0, ev)
-        me.emit.apply(me, args)
-      }
-    }
-
-    return Stream.prototype.on.call(me, ev, handler)
-  }
-
-  // this really needs to be replaced with character classes.
-  // XML allows all manner of ridiculous numbers and digits.
-  var CDATA = '[CDATA['
-  var DOCTYPE = 'DOCTYPE'
-  var XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace'
-  var XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/'
-  var rootNS = { xml: XML_NAMESPACE, xmlns: XMLNS_NAMESPACE }
-
-  // http://www.w3.org/TR/REC-xml/#NT-NameStartChar
-  // This implementation works on strings, a single character at a time
-  // as such, it cannot ever support astral-plane characters (10000-EFFFF)
-  // without a significant breaking change to either this  parser, or the
-  // JavaScript language.  Implementation of an emoji-capable xml parser
-  // is left as an exercise for the reader.
-  var nameStart = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/
-
-  var nameBody = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/
-
-  var entityStart = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/
-  var entityBody = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/
-
-  function isWhitespace (c) {
-    return c === ' ' || c === '\n' || c === '\r' || c === '\t'
-  }
-
-  function isQuote (c) {
-    return c === '"' || c === '\''
-  }
-
-  function isAttribEnd (c) {
-    return c === '>' || isWhitespace(c)
-  }
-
-  function isMatch (regex, c) {
-    return regex.test(c)
-  }
-
-  function notMatch (regex, c) {
-    return !isMatch(regex, c)
-  }
-
-  var S = 0
-  sax.STATE = {
-    BEGIN: S++, // leading byte order mark or whitespace
-    BEGIN_WHITESPACE: S++, // leading whitespace
-    TEXT: S++, // general stuff
-    TEXT_ENTITY: S++, // &amp and such.
-    OPEN_WAKA: S++, // <
-    SGML_DECL: S++, // <!BLARG
-    SGML_DECL_QUOTED: S++, // <!BLARG foo "bar
-    DOCTYPE: S++, // <!DOCTYPE
-    DOCTYPE_QUOTED: S++, // <!DOCTYPE "//blah
-    DOCTYPE_DTD: S++, // <!DOCTYPE "//blah" [ ...
-    DOCTYPE_DTD_QUOTED: S++, // <!DOCTYPE "//blah" [ "foo
-    COMMENT_STARTING: S++, // <!-
-    COMMENT: S++, // <!--
-    COMMENT_ENDING: S++, // <!-- blah -
-    COMMENT_ENDED: S++, // <!-- blah --
-    CDATA: S++, // <![CDATA[ something
-    CDATA_ENDING: S++, // ]
-    CDATA_ENDING_2: S++, // ]]
-    PROC_INST: S++, // <?hi
-    PROC_INST_BODY: S++, // <?hi there
-    PROC_INST_ENDING: S++, // <?hi "there" ?
-    OPEN_TAG: S++, // <strong
-    OPEN_TAG_SLASH: S++, // <strong /
-    ATTRIB: S++, // <a
-    ATTRIB_NAME: S++, // <a foo
-    ATTRIB_NAME_SAW_WHITE: S++, // <a foo _
-    ATTRIB_VALUE: S++, // <a foo=
-    ATTRIB_VALUE_QUOTED: S++, // <a foo="bar
-    ATTRIB_VALUE_CLOSED: S++, // <a foo="bar"
-    ATTRIB_VALUE_UNQUOTED: S++, // <a foo=bar
-    ATTRIB_VALUE_ENTITY_Q: S++, // <foo bar="&quot;"
-    ATTRIB_VALUE_ENTITY_U: S++, // <foo bar=&quot
-    CLOSE_TAG: S++, // </a
-    CLOSE_TAG_SAW_WHITE: S++, // </a   >
-    SCRIPT: S++, // <script> ...
-    SCRIPT_ENDING: S++ // <script> ... <
-  }
-
-  sax.XML_ENTITIES = {
-    'amp': '&',
-    'gt': '>',
-    'lt': '<',
-    'quot': '"',
-    'apos': "'"
-  }
-
-  sax.ENTITIES = {
-    'amp': '&',
-    'gt': '>',
-    'lt': '<',
-    'quot': '"',
-    'apos': "'",
-    'AElig': 198,
-    'Aacute': 193,
-    'Acirc': 194,
-    'Agrave': 192,
-    'Aring': 197,
-    'Atilde': 195,
-    'Auml': 196,
-    'Ccedil': 199,
-    'ETH': 208,
-    'Eacute': 201,
-    'Ecirc': 202,
-    'Egrave': 200,
-    'Euml': 203,
-    'Iacute': 205,
-    'Icirc': 206,
-    'Igrave': 204,
-    'Iuml': 207,
-    'Ntilde': 209,
-    'Oacute': 211,
-    'Ocirc': 212,
-    'Ograve': 210,
-    'Oslash': 216,
-    'Otilde': 213,
-    'Ouml': 214,
-    'THORN': 222,
-    'Uacute': 218,
-    'Ucirc': 219,
-    'Ugrave': 217,
-    'Uuml': 220,
-    'Yacute': 221,
-    'aacute': 225,
-    'acirc': 226,
-    'aelig': 230,
-    'agrave': 224,
-    'aring': 229,
-    'atilde': 227,
-    'auml': 228,
-    'ccedil': 231,
-    'eacute': 233,
-    'ecirc': 234,
-    'egrave': 232,
-    'eth': 240,
-    'euml': 235,
-    'iacute': 237,
-    'icirc': 238,
-    'igrave': 236,
-    'iuml': 239,
-    'ntilde': 241,
-    'oacute': 243,
-    'ocirc': 244,
-    'ograve': 242,
-    'oslash': 248,
-    'otilde': 245,
-    'ouml': 246,
-    'szlig': 223,
-    'thorn': 254,
-    'uacute': 250,
-    'ucirc': 251,
-    'ugrave': 249,
-    'uuml': 252,
-    'yacute': 253,
-    'yuml': 255,
-    'copy': 169,
-    'reg': 174,
-    'nbsp': 160,
-    'iexcl': 161,
-    'cent': 162,
-    'pound': 163,
-    'curren': 164,
-    'yen': 165,
-    'brvbar': 166,
-    'sect': 167,
-    'uml': 168,
-    'ordf': 170,
-    'laquo': 171,
-    'not': 172,
-    'shy': 173,
-    'macr': 175,
-    'deg': 176,
-    'plusmn': 177,
-    'sup1': 185,
-    'sup2': 178,
-    'sup3': 179,
-    'acute': 180,
-    'micro': 181,
-    'para': 182,
-    'middot': 183,
-    'cedil': 184,
-    'ordm': 186,
-    'raquo': 187,
-    'frac14': 188,
-    'frac12': 189,
-    'frac34': 190,
-    'iquest': 191,
-    'times': 215,
-    'divide': 247,
-    'OElig': 338,
-    'oelig': 339,
-    'Scaron': 352,
-    'scaron': 353,
-    'Yuml': 376,
-    'fnof': 402,
-    'circ': 710,
-    'tilde': 732,
-    'Alpha': 913,
-    'Beta': 914,
-    'Gamma': 915,
-    'Delta': 916,
-    'Epsilon': 917,
-    'Zeta': 918,
-    'Eta': 919,
-    'Theta': 920,
-    'Iota': 921,
-    'Kappa': 922,
-    'Lambda': 923,
-    'Mu': 924,
-    'Nu': 925,
-    'Xi': 926,
-    'Omicron': 927,
-    'Pi': 928,
-    'Rho': 929,
-    'Sigma': 931,
-    'Tau': 932,
-    'Upsilon': 933,
-    'Phi': 934,
-    'Chi': 935,
-    'Psi': 936,
-    'Omega': 937,
-    'alpha': 945,
-    'beta': 946,
-    'gamma': 947,
-    'delta': 948,
-    'epsilon': 949,
-    'zeta': 950,
-    'eta': 951,
-    'theta': 952,
-    'iota': 953,
-    'kappa': 954,
-    'lambda': 955,
-    'mu': 956,
-    'nu': 957,
-    'xi': 958,
-    'omicron': 959,
-    'pi': 960,
-    'rho': 961,
-    'sigmaf': 962,
-    'sigma': 963,
-    'tau': 964,
-    'upsilon': 965,
-    'phi': 966,
-    'chi': 967,
-    'psi': 968,
-    'omega': 969,
-    'thetasym': 977,
-    'upsih': 978,
-    'piv': 982,
-    'ensp': 8194,
-    'emsp': 8195,
-    'thinsp': 8201,
-    'zwnj': 8204,
-    'zwj': 8205,
-    'lrm': 8206,
-    'rlm': 8207,
-    'ndash': 8211,
-    'mdash': 8212,
-    'lsquo': 8216,
-    'rsquo': 8217,
-    'sbquo': 8218,
-    'ldquo': 8220,
-    'rdquo': 8221,
-    'bdquo': 8222,
-    'dagger': 8224,
-    'Dagger': 8225,
-    'bull': 8226,
-    'hellip': 8230,
-    'permil': 8240,
-    'prime': 8242,
-    'Prime': 8243,
-    'lsaquo': 8249,
-    'rsaquo': 8250,
-    'oline': 8254,
-    'frasl': 8260,
-    'euro': 8364,
-    'image': 8465,
-    'weierp': 8472,
-    'real': 8476,
-    'trade': 8482,
-    'alefsym': 8501,
-    'larr': 8592,
-    'uarr': 8593,
-    'rarr': 8594,
-    'darr': 8595,
-    'harr': 8596,
-    'crarr': 8629,
-    'lArr': 8656,
-    'uArr': 8657,
-    'rArr': 8658,
-    'dArr': 8659,
-    'hArr': 8660,
-    'forall': 8704,
-    'part': 8706,
-    'exist': 8707,
-    'empty': 8709,
-    'nabla': 8711,
-    'isin': 8712,
-    'notin': 8713,
-    'ni': 8715,
-    'prod': 8719,
-    'sum': 8721,
-    'minus': 8722,
-    'lowast': 8727,
-    'radic': 8730,
-    'prop': 8733,
-    'infin': 8734,
-    'ang': 8736,
-    'and': 8743,
-    'or': 8744,
-    'cap': 8745,
-    'cup': 8746,
-    'int': 8747,
-    'there4': 8756,
-    'sim': 8764,
-    'cong': 8773,
-    'asymp': 8776,
-    'ne': 8800,
-    'equiv': 8801,
-    'le': 8804,
-    'ge': 8805,
-    'sub': 8834,
-    'sup': 8835,
-    'nsub': 8836,
-    'sube': 8838,
-    'supe': 8839,
-    'oplus': 8853,
-    'otimes': 8855,
-    'perp': 8869,
-    'sdot': 8901,
-    'lceil': 8968,
-    'rceil': 8969,
-    'lfloor': 8970,
-    'rfloor': 8971,
-    'lang': 9001,
-    'rang': 9002,
-    'loz': 9674,
-    'spades': 9824,
-    'clubs': 9827,
-    'hearts': 9829,
-    'diams': 9830
-  }
-
-  Object.keys(sax.ENTITIES).forEach(function (key) {
-    var e = sax.ENTITIES[key]
-    var s = typeof e === 'number' ? String.fromCharCode(e) : e
-    sax.ENTITIES[key] = s
-  })
-
-  for (var s in sax.STATE) {
-    sax.STATE[sax.STATE[s]] = s
-  }
-
-  // shorthand
-  S = sax.STATE
-
-  function emit (parser, event, data) {
-    parser[event] && parser[event](data)
-  }
-
-  function emitNode (parser, nodeType, data) {
-    if (parser.textNode) closeText(parser)
-    emit(parser, nodeType, data)
-  }
-
-  function closeText (parser) {
-    parser.textNode = textopts(parser.opt, parser.textNode)
-    if (parser.textNode) emit(parser, 'ontext', parser.textNode)
-    parser.textNode = ''
-  }
-
-  function textopts (opt, text) {
-    if (opt.trim) text = text.trim()
-    if (opt.normalize) text = text.replace(/\s+/g, ' ')
-    return text
-  }
-
-  function error (parser, er) {
-    closeText(parser)
-    if (parser.trackPosition) {
-      er += '\nLine: ' + parser.line +
-        '\nColumn: ' + parser.column +
-        '\nChar: ' + parser.c
-    }
-    er = new Error(er)
-    parser.error = er
-    emit(parser, 'onerror', er)
-    return parser
-  }
-
-  function end (parser) {
-    if (parser.sawRoot && !parser.closedRoot) strictFail(parser, 'Unclosed root tag')
-    if ((parser.state !== S.BEGIN) &&
-      (parser.state !== S.BEGIN_WHITESPACE) &&
-      (parser.state !== S.TEXT)) {
-      error(parser, 'Unexpected end')
-    }
-    closeText(parser)
-    parser.c = ''
-    parser.closed = true
-    emit(parser, 'onend')
-    SAXParser.call(parser, parser.strict, parser.opt)
-    return parser
-  }
-
-  function strictFail (parser, message) {
-    if (typeof parser !== 'object' || !(parser instanceof SAXParser)) {
-      throw new Error('bad call to strictFail')
-    }
-    if (parser.strict) {
-      error(parser, message)
-    }
-  }
-
-  function newTag (parser) {
-    if (!parser.strict) parser.tagName = parser.tagName[parser.looseCase]()
-    var parent = parser.tags[parser.tags.length - 1] || parser
-    var tag = parser.tag = { name: parser.tagName, attributes: {} }
-
-    // will be overridden if tag contails an xmlns="foo" or xmlns:foo="bar"
-    if (parser.opt.xmlns) {
-      tag.ns = parent.ns
-    }
-    parser.attribList.length = 0
-    emitNode(parser, 'onopentagstart', tag)
-  }
-
-  function qname (name, attribute) {
-    var i = name.indexOf(':')
-    var qualName = i < 0 ? [ '', name ] : name.split(':')
-    var prefix = qualName[0]
-    var local = qualName[1]
-
-    // <x "xmlns"="http://foo">
-    if (attribute && name === 'xmlns') {
-      prefix = 'xmlns'
-      local = ''
-    }
-
-    return { prefix: prefix, local: local }
-  }
-
-  function attrib (parser) {
-    if (!parser.strict) {
-      parser.attribName = parser.attribName[parser.looseCase]()
-    }
-
-    if (parser.attribList.indexOf(parser.attribName) !== -1 ||
-      parser.tag.attributes.hasOwnProperty(parser.attribName)) {
-      parser.attribName = parser.attribValue = ''
-      return
-    }
-
-    if (parser.opt.xmlns) {
-      var qn = qname(parser.attribName, true)
-      var prefix = qn.prefix
-      var local = qn.local
-
-      if (prefix === 'xmlns') {
-        // namespace binding attribute. push the binding into scope
-        if (local === 'xml' && parser.attribValue !== XML_NAMESPACE) {
-          strictFail(parser,
-            'xml: prefix must be bound to ' + XML_NAMESPACE + '\n' +
-            'Actual: ' + parser.attribValue)
-        } else if (local === 'xmlns' && parser.attribValue !== XMLNS_NAMESPACE) {
-          strictFail(parser,
-            'xmlns: prefix must be bound to ' + XMLNS_NAMESPACE + '\n' +
-            'Actual: ' + parser.attribValue)
-        } else {
-          var tag = parser.tag
-          var parent = parser.tags[parser.tags.length - 1] || parser
-          if (tag.ns === parent.ns) {
-            tag.ns = Object.create(parent.ns)
-          }
-          tag.ns[local] = parser.attribValue
-        }
-      }
-
-      // defer onattribute events until all attributes have been seen
-      // so any new bindings can take effect. preserve attribute order
-      // so deferred events can be emitted in document order
-      parser.attribList.push([parser.attribName, parser.attribValue])
-    } else {
-      // in non-xmlns mode, we can emit the event right away
-      parser.tag.attributes[parser.attribName] = parser.attribValue
-      emitNode(parser, 'onattribute', {
-        name: parser.attribName,
-        value: parser.attribValue
-      })
-    }
-
-    parser.attribName = parser.attribValue = ''
-  }
-
-  function openTag (parser, selfClosing) {
-    if (parser.opt.xmlns) {
-      // emit namespace binding events
-      var tag = parser.tag
-
-      // add namespace info to tag
-      var qn = qname(parser.tagName)
-      tag.prefix = qn.prefix
-      tag.local = qn.local
-      tag.uri = tag.ns[qn.prefix] || ''
-
-      if (tag.prefix && !tag.uri) {
-        strictFail(parser, 'Unbound namespace prefix: ' +
-          JSON.stringify(parser.tagName))
-        tag.uri = qn.prefix
-      }
-
-      var parent = parser.tags[parser.tags.length - 1] || parser
-      if (tag.ns && parent.ns !== tag.ns) {
-        Object.keys(tag.ns).forEach(function (p) {
-          emitNode(parser, 'onopennamespace', {
-            prefix: p,
-            uri: tag.ns[p]
-          })
-        })
-      }
-
-      // handle deferred onattribute events
-      // Note: do not apply default ns to attributes:
-      //   http://www.w3.org/TR/REC-xml-names/#defaulting
-      for (var i = 0, l = parser.attribList.length; i < l; i++) {
-        var nv = parser.attribList[i]
-        var name = nv[0]
-        var value = nv[1]
-        var qualName = qname(name, true)
-        var prefix = qualName.prefix
-        var local = qualName.local
-        var uri = prefix === '' ? '' : (tag.ns[prefix] || '')
-        var a = {
-          name: name,
-          value: value,
-          prefix: prefix,
-          local: local,
-          uri: uri
-        }
-
-        // if there's any attributes with an undefined namespace,
-        // then fail on them now.
-        if (prefix && prefix !== 'xmlns' && !uri) {
-          strictFail(parser, 'Unbound namespace prefix: ' +
-            JSON.stringify(prefix))
-          a.uri = prefix
-        }
-        parser.tag.attributes[name] = a
-        emitNode(parser, 'onattribute', a)
-      }
-      parser.attribList.length = 0
-    }
-
-    parser.tag.isSelfClosing = !!selfClosing
-
-    // process the tag
-    parser.sawRoot = true
-    parser.tags.push(parser.tag)
-    emitNode(parser, 'onopentag', parser.tag)
-    if (!selfClosing) {
-      // special case for <script> in non-strict mode.
-      if (!parser.noscript && parser.tagName.toLowerCase() === 'script') {
-        parser.state = S.SCRIPT
-      } else {
-        parser.state = S.TEXT
-      }
-      parser.tag = null
-      parser.tagName = ''
-    }
-    parser.attribName = parser.attribValue = ''
-    parser.attribList.length = 0
-  }
-
-  function closeTag (parser) {
-    if (!parser.tagName) {
-      strictFail(parser, 'Weird empty close tag.')
-      parser.textNode += '</>'
-      parser.state = S.TEXT
-      return
-    }
-
-    if (parser.script) {
-      if (parser.tagName !== 'script') {
-        parser.script += '</' + parser.tagName + '>'
-        parser.tagName = ''
-        parser.state = S.SCRIPT
-        return
-      }
-      emitNode(parser, 'onscript', parser.script)
-      parser.script = ''
-    }
-
-    // first make sure that the closing tag actually exists.
-    // <a><b></c></b></a> will close everything, otherwise.
-    var t = parser.tags.length
-    var tagName = parser.tagName
-    if (!parser.strict) {
-      tagName = tagName[parser.looseCase]()
-    }
-    var closeTo = tagName
-    while (t--) {
-      var close = parser.tags[t]
-      if (close.name !== closeTo) {
-        // fail the first time in strict mode
-        strictFail(parser, 'Unexpected close tag')
-      } else {
-        break
-      }
-    }
-
-    // didn't find it.  we already failed for strict, so just abort.
-    if (t < 0) {
-      strictFail(parser, 'Unmatched closing tag: ' + parser.tagName)
-      parser.textNode += '</' + parser.tagName + '>'
-      parser.state = S.TEXT
-      return
-    }
-    parser.tagName = tagName
-    var s = parser.tags.length
-    while (s-- > t) {
-      var tag = parser.tag = parser.tags.pop()
-      parser.tagName = parser.tag.name
-      emitNode(parser, 'onclosetag', parser.tagName)
-
-      var x = {}
-      for (var i in tag.ns) {
-        x[i] = tag.ns[i]
-      }
-
-      var parent = parser.tags[parser.tags.length - 1] || parser
-      if (parser.opt.xmlns && tag.ns !== parent.ns) {
-        // remove namespace bindings introduced by tag
-        Object.keys(tag.ns).forEach(function (p) {
-          var n = tag.ns[p]
-          emitNode(parser, 'onclosenamespace', { prefix: p, uri: n })
-        })
-      }
-    }
-    if (t === 0) parser.closedRoot = true
-    parser.tagName = parser.attribValue = parser.attribName = ''
-    parser.attribList.length = 0
-    parser.state = S.TEXT
-  }
-
-  function parseEntity (parser) {
-    var entity = parser.entity
-    var entityLC = entity.toLowerCase()
-    var num
-    var numStr = ''
-
-    if (parser.ENTITIES[entity]) {
-      return parser.ENTITIES[entity]
-    }
-    if (parser.ENTITIES[entityLC]) {
-      return parser.ENTITIES[entityLC]
-    }
-    entity = entityLC
-    if (entity.charAt(0) === '#') {
-      if (entity.charAt(1) === 'x') {
-        entity = entity.slice(2)
-        num = parseInt(entity, 16)
-        numStr = num.toString(16)
-      } else {
-        entity = entity.slice(1)
-        num = parseInt(entity, 10)
-        numStr = num.toString(10)
-      }
-    }
-    entity = entity.replace(/^0+/, '')
-    if (isNaN(num) || numStr.toLowerCase() !== entity) {
-      strictFail(parser, 'Invalid character entity')
-      return '&' + parser.entity + ';'
-    }
-
-    return String.fromCodePoint(num)
-  }
-
-  function beginWhiteSpace (parser, c) {
-    if (c === '<') {
-      parser.state = S.OPEN_WAKA
-      parser.startTagPosition = parser.position
-    } else if (!isWhitespace(c)) {
-      // have to process this as a text node.
-      // weird, but happens.
-      strictFail(parser, 'Non-whitespace before first tag.')
-      parser.textNode = c
-      parser.state = S.TEXT
-    }
-  }
-
-  function charAt (chunk, i) {
-    var result = ''
-    if (i < chunk.length) {
-      result = chunk.charAt(i)
-    }
-    return result
-  }
-
-  function write (chunk) {
-    var parser = this
-    if (this.error) {
-      throw this.error
-    }
-    if (parser.closed) {
-      return error(parser,
-        'Cannot write after close. Assign an onready handler.')
-    }
-    if (chunk === null) {
-      return end(parser)
-    }
-    if (typeof chunk === 'object') {
-      chunk = chunk.toString()
-    }
-    var i = 0
-    var c = ''
-    while (true) {
-      c = charAt(chunk, i++)
-      parser.c = c
-
-      if (!c) {
-        break
-      }
-
-      if (parser.trackPosition) {
-        parser.position++
-        if (c === '\n') {
-          parser.line++
-          parser.column = 0
-        } else {
-          parser.column++
-        }
-      }
-
-      switch (parser.state) {
-        case S.BEGIN:
-          parser.state = S.BEGIN_WHITESPACE
-          if (c === '\uFEFF') {
-            continue
-          }
-          beginWhiteSpace(parser, c)
-          continue
-
-        case S.BEGIN_WHITESPACE:
-          beginWhiteSpace(parser, c)
-          continue
-
-        case S.TEXT:
-          if (parser.sawRoot && !parser.closedRoot) {
-            var starti = i - 1
-            while (c && c !== '<' && c !== '&') {
-              c = charAt(chunk, i++)
-              if (c && parser.trackPosition) {
-                parser.position++
-                if (c === '\n') {
-                  parser.line++
-                  parser.column = 0
-                } else {
-                  parser.column++
-                }
-              }
-            }
-            parser.textNode += chunk.substring(starti, i - 1)
-          }
-          if (c === '<' && !(parser.sawRoot && parser.closedRoot && !parser.strict)) {
-            parser.state = S.OPEN_WAKA
-            parser.startTagPosition = parser.position
-          } else {
-            if (!isWhitespace(c) && (!parser.sawRoot || parser.closedRoot)) {
-              strictFail(parser, 'Text data outside of root node.')
-            }
-            if (c === '&') {
-              parser.state = S.TEXT_ENTITY
-            } else {
-              parser.textNode += c
-            }
-          }
-          continue
-
-        case S.SCRIPT:
-          // only non-strict
-          if (c === '<') {
-            parser.state = S.SCRIPT_ENDING
-          } else {
-            parser.script += c
-          }
-          continue
-
-        case S.SCRIPT_ENDING:
-          if (c === '/') {
-            parser.state = S.CLOSE_TAG
-          } else {
-            parser.script += '<' + c
-            parser.state = S.SCRIPT
-          }
-          continue
-
-        case S.OPEN_WAKA:
-          // either a /, ?, !, or text is coming next.
-          if (c === '!') {
-            parser.state = S.SGML_DECL
-            parser.sgmlDecl = ''
-          } else if (isWhitespace(c)) {
-            // wait for it...
-          } else if (isMatch(nameStart, c)) {
-            parser.state = S.OPEN_TAG
-            parser.tagName = c
-          } else if (c === '/') {
-            parser.state = S.CLOSE_TAG
-            parser.tagName = ''
-          } else if (c === '?') {
-            parser.state = S.PROC_INST
-            parser.procInstName = parser.procInstBody = ''
-          } else {
-            strictFail(parser, 'Unencoded <')
-            // if there was some whitespace, then add that in.
-            if (parser.startTagPosition + 1 < parser.position) {
-              var pad = parser.position - parser.startTagPosition
-              c = new Array(pad).join(' ') + c
-            }
-            parser.textNode += '<' + c
-            parser.state = S.TEXT
-          }
-          continue
-
-        case S.SGML_DECL:
-          if ((parser.sgmlDecl + c).toUpperCase() === CDATA) {
-            emitNode(parser, 'onopencdata')
-            parser.state = S.CDATA
-            parser.sgmlDecl = ''
-            parser.cdata = ''
-          } else if (parser.sgmlDecl + c === '--') {
-            parser.state = S.COMMENT
-            parser.comment = ''
-            parser.sgmlDecl = ''
-          } else if ((parser.sgmlDecl + c).toUpperCase() === DOCTYPE) {
-            parser.state = S.DOCTYPE
-            if (parser.doctype || parser.sawRoot) {
-              strictFail(parser,
-                'Inappropriately located doctype declaration')
-            }
-            parser.doctype = ''
-            parser.sgmlDecl = ''
-          } else if (c === '>') {
-            emitNode(parser, 'onsgmldeclaration', parser.sgmlDecl)
-            parser.sgmlDecl = ''
-            parser.state = S.TEXT
-          } else if (isQuote(c)) {
-            parser.state = S.SGML_DECL_QUOTED
-            parser.sgmlDecl += c
-          } else {
-            parser.sgmlDecl += c
-          }
-          continue
-
-        case S.SGML_DECL_QUOTED:
-          if (c === parser.q) {
-            parser.state = S.SGML_DECL
-            parser.q = ''
-          }
-          parser.sgmlDecl += c
-          continue
-
-        case S.DOCTYPE:
-          if (c === '>') {
-            parser.state = S.TEXT
-            emitNode(parser, 'ondoctype', parser.doctype)
-            parser.doctype = true // just remember that we saw it.
-          } else {
-            parser.doctype += c
-            if (c === '[') {
-              parser.state = S.DOCTYPE_DTD
-            } else if (isQuote(c)) {
-              parser.state = S.DOCTYPE_QUOTED
-              parser.q = c
-            }
-          }
-          continue
-
-        case S.DOCTYPE_QUOTED:
-          parser.doctype += c
-          if (c === parser.q) {
-            parser.q = ''
-            parser.state = S.DOCTYPE
-          }
-          continue
-
-        case S.DOCTYPE_DTD:
-          parser.doctype += c
-          if (c === ']') {
-            parser.state = S.DOCTYPE
-          } else if (isQuote(c)) {
-            parser.state = S.DOCTYPE_DTD_QUOTED
-            parser.q = c
-          }
-          continue
-
-        case S.DOCTYPE_DTD_QUOTED:
-          parser.doctype += c
-          if (c === parser.q) {
-            parser.state = S.DOCTYPE_DTD
-            parser.q = ''
-          }
-          continue
-
-        case S.COMMENT:
-          if (c === '-') {
-            parser.state = S.COMMENT_ENDING
-          } else {
-            parser.comment += c
-          }
-          continue
-
-        case S.COMMENT_ENDING:
-          if (c === '-') {
-            parser.state = S.COMMENT_ENDED
-            parser.comment = textopts(parser.opt, parser.comment)
-            if (parser.comment) {
-              emitNode(parser, 'oncomment', parser.comment)
-            }
-            parser.comment = ''
-          } else {
-            parser.comment += '-' + c
-            parser.state = S.COMMENT
-          }
-          continue
-
-        case S.COMMENT_ENDED:
-          if (c !== '>') {
-            strictFail(parser, 'Malformed comment')
-            // allow <!-- blah -- bloo --> in non-strict mode,
-            // which is a comment of " blah -- bloo "
-            parser.comment += '--' + c
-            parser.state = S.COMMENT
-          } else {
-            parser.state = S.TEXT
-          }
-          continue
-
-        case S.CDATA:
-          if (c === ']') {
-            parser.state = S.CDATA_ENDING
-          } else {
-            parser.cdata += c
-          }
-          continue
-
-        case S.CDATA_ENDING:
-          if (c === ']') {
-            parser.state = S.CDATA_ENDING_2
-          } else {
-            parser.cdata += ']' + c
-            parser.state = S.CDATA
-          }
-          continue
-
-        case S.CDATA_ENDING_2:
-          if (c === '>') {
-            if (parser.cdata) {
-              emitNode(parser, 'oncdata', parser.cdata)
-            }
-            emitNode(parser, 'onclosecdata')
-            parser.cdata = ''
-            parser.state = S.TEXT
-          } else if (c === ']') {
-            parser.cdata += ']'
-          } else {
-            parser.cdata += ']]' + c
-            parser.state = S.CDATA
-          }
-          continue
-
-        case S.PROC_INST:
-          if (c === '?') {
-            parser.state = S.PROC_INST_ENDING
-          } else if (isWhitespace(c)) {
-            parser.state = S.PROC_INST_BODY
-          } else {
-            parser.procInstName += c
-          }
-          continue
-
-        case S.PROC_INST_BODY:
-          if (!parser.procInstBody && isWhitespace(c)) {
-            continue
-          } else if (c === '?') {
-            parser.state = S.PROC_INST_ENDING
-          } else {
-            parser.procInstBody += c
-          }
-          continue
-
-        case S.PROC_INST_ENDING:
-          if (c === '>') {
-            emitNode(parser, 'onprocessinginstruction', {
-              name: parser.procInstName,
-              body: parser.procInstBody
-            })
-            parser.procInstName = parser.procInstBody = ''
-            parser.state = S.TEXT
-          } else {
-            parser.procInstBody += '?' + c
-            parser.state = S.PROC_INST_BODY
-          }
-          continue
-
-        case S.OPEN_TAG:
-          if (isMatch(nameBody, c)) {
-            parser.tagName += c
-          } else {
-            newTag(parser)
-            if (c === '>') {
-              openTag(parser)
-            } else if (c === '/') {
-              parser.state = S.OPEN_TAG_SLASH
-            } else {
-              if (!isWhitespace(c)) {
-                strictFail(parser, 'Invalid character in tag name')
-              }
-              parser.state = S.ATTRIB
-            }
-          }
-          continue
-
-        case S.OPEN_TAG_SLASH:
-          if (c === '>') {
-            openTag(parser, true)
-            closeTag(parser)
-          } else {
-            strictFail(parser, 'Forward-slash in opening tag not followed by >')
-            parser.state = S.ATTRIB
-          }
-          continue
-
-        case S.ATTRIB:
-          // haven't read the attribute name yet.
-          if (isWhitespace(c)) {
-            continue
-          } else if (c === '>') {
-            openTag(parser)
-          } else if (c === '/') {
-            parser.state = S.OPEN_TAG_SLASH
-          } else if (isMatch(nameStart, c)) {
-            parser.attribName = c
-            parser.attribValue = ''
-            parser.state = S.ATTRIB_NAME
-          } else {
-            strictFail(parser, 'Invalid attribute name')
-          }
-          continue
-
-        case S.ATTRIB_NAME:
-          if (c === '=') {
-            parser.state = S.ATTRIB_VALUE
-          } else if (c === '>') {
-            strictFail(parser, 'Attribute without value')
-            parser.attribValue = parser.attribName
-            attrib(parser)
-            openTag(parser)
-          } else if (isWhitespace(c)) {
-            parser.state = S.ATTRIB_NAME_SAW_WHITE
-          } else if (isMatch(nameBody, c)) {
-            parser.attribName += c
-          } else {
-            strictFail(parser, 'Invalid attribute name')
-          }
-          continue
-
-        case S.ATTRIB_NAME_SAW_WHITE:
-          if (c === '=') {
-            parser.state = S.ATTRIB_VALUE
-          } else if (isWhitespace(c)) {
-            continue
-          } else {
-            strictFail(parser, 'Attribute without value')
-            parser.tag.attributes[parser.attribName] = ''
-            parser.attribValue = ''
-            emitNode(parser, 'onattribute', {
-              name: parser.attribName,
-              value: ''
-            })
-            parser.attribName = ''
-            if (c === '>') {
-              openTag(parser)
-            } else if (isMatch(nameStart, c)) {
-              parser.attribName = c
-              parser.state = S.ATTRIB_NAME
-            } else {
-              strictFail(parser, 'Invalid attribute name')
-              parser.state = S.ATTRIB
-            }
-          }
-          continue
-
-        case S.ATTRIB_VALUE:
-          if (isWhitespace(c)) {
-            continue
-          } else if (isQuote(c)) {
-            parser.q = c
-            parser.state = S.ATTRIB_VALUE_QUOTED
-          } else {
-            strictFail(parser, 'Unquoted attribute value')
-            parser.state = S.ATTRIB_VALUE_UNQUOTED
-            parser.attribValue = c
-          }
-          continue
-
-        case S.ATTRIB_VALUE_QUOTED:
-          if (c !== parser.q) {
-            if (c === '&') {
-              parser.state = S.ATTRIB_VALUE_ENTITY_Q
-            } else {
-              parser.attribValue += c
-            }
-            continue
-          }
-          attrib(parser)
-          parser.q = ''
-          parser.state = S.ATTRIB_VALUE_CLOSED
-          continue
-
-        case S.ATTRIB_VALUE_CLOSED:
-          if (isWhitespace(c)) {
-            parser.state = S.ATTRIB
-          } else if (c === '>') {
-            openTag(parser)
-          } else if (c === '/') {
-            parser.state = S.OPEN_TAG_SLASH
-          } else if (isMatch(nameStart, c)) {
-            strictFail(parser, 'No whitespace between attributes')
-            parser.attribName = c
-            parser.attribValue = ''
-            parser.state = S.ATTRIB_NAME
-          } else {
-            strictFail(parser, 'Invalid attribute name')
-          }
-          continue
-
-        case S.ATTRIB_VALUE_UNQUOTED:
-          if (!isAttribEnd(c)) {
-            if (c === '&') {
-              parser.state = S.ATTRIB_VALUE_ENTITY_U
-            } else {
-              parser.attribValue += c
-            }
-            continue
-          }
-          attrib(parser)
-          if (c === '>') {
-            openTag(parser)
-          } else {
-            parser.state = S.ATTRIB
-          }
-          continue
-
-        case S.CLOSE_TAG:
-          if (!parser.tagName) {
-            if (isWhitespace(c)) {
-              continue
-            } else if (notMatch(nameStart, c)) {
-              if (parser.script) {
-                parser.script += '</' + c
-                parser.state = S.SCRIPT
-              } else {
-                strictFail(parser, 'Invalid tagname in closing tag.')
-              }
-            } else {
-              parser.tagName = c
-            }
-          } else if (c === '>') {
-            closeTag(parser)
-          } else if (isMatch(nameBody, c)) {
-            parser.tagName += c
-          } else if (parser.script) {
-            parser.script += '</' + parser.tagName
-            parser.tagName = ''
-            parser.state = S.SCRIPT
-          } else {
-            if (!isWhitespace(c)) {
-              strictFail(parser, 'Invalid tagname in closing tag')
-            }
-            parser.state = S.CLOSE_TAG_SAW_WHITE
-          }
-          continue
-
-        case S.CLOSE_TAG_SAW_WHITE:
-          if (isWhitespace(c)) {
-            continue
-          }
-          if (c === '>') {
-            closeTag(parser)
-          } else {
-            strictFail(parser, 'Invalid characters in closing tag')
-          }
-          continue
-
-        case S.TEXT_ENTITY:
-        case S.ATTRIB_VALUE_ENTITY_Q:
-        case S.ATTRIB_VALUE_ENTITY_U:
-          var returnState
-          var buffer
-          switch (parser.state) {
-            case S.TEXT_ENTITY:
-              returnState = S.TEXT
-              buffer = 'textNode'
-              break
-
-            case S.ATTRIB_VALUE_ENTITY_Q:
-              returnState = S.ATTRIB_VALUE_QUOTED
-              buffer = 'attribValue'
-              break
-
-            case S.ATTRIB_VALUE_ENTITY_U:
-              returnState = S.ATTRIB_VALUE_UNQUOTED
-              buffer = 'attribValue'
-              break
-          }
-
-          if (c === ';') {
-            parser[buffer] += parseEntity(parser)
-            parser.entity = ''
-            parser.state = returnState
-          } else if (isMatch(parser.entity.length ? entityBody : entityStart, c)) {
-            parser.entity += c
-          } else {
-            strictFail(parser, 'Invalid character in entity name')
-            parser[buffer] += '&' + parser.entity + c
-            parser.entity = ''
-            parser.state = returnState
-          }
-
-          continue
-
-        default:
-          throw new Error(parser, 'Unknown state: ' + parser.state)
-      }
-    } // while
-
-    if (parser.position >= parser.bufferCheckPosition) {
-      checkBufferLength(parser)
-    }
-    return parser
-  }
-
-  /*! http://mths.be/fromcodepoint v0.1.0 by @mathias */
-  /* istanbul ignore next */
-  if (!String.fromCodePoint) {
-    (function () {
-      var stringFromCharCode = String.fromCharCode
-      var floor = Math.floor
-      var fromCodePoint = function () {
-        var MAX_SIZE = 0x4000
-        var codeUnits = []
-        var highSurrogate
-        var lowSurrogate
-        var index = -1
-        var length = arguments.length
-        if (!length) {
-          return ''
-        }
-        var result = ''
-        while (++index < length) {
-          var codePoint = Number(arguments[index])
-          if (
-            !isFinite(codePoint) || // `NaN`, `+Infinity`, or `-Infinity`
-            codePoint < 0 || // not a valid Unicode code point
-            codePoint > 0x10FFFF || // not a valid Unicode code point
-            floor(codePoint) !== codePoint // not an integer
-          ) {
-            throw RangeError('Invalid code point: ' + codePoint)
-          }
-          if (codePoint <= 0xFFFF) { // BMP code point
-            codeUnits.push(codePoint)
-          } else { // Astral code point; split in surrogate halves
-            // http://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
-            codePoint -= 0x10000
-            highSurrogate = (codePoint >> 10) + 0xD800
-            lowSurrogate = (codePoint % 0x400) + 0xDC00
-            codeUnits.push(highSurrogate, lowSurrogate)
-          }
-          if (index + 1 === length || codeUnits.length > MAX_SIZE) {
-            result += stringFromCharCode.apply(null, codeUnits)
-            codeUnits.length = 0
-          }
-        }
-        return result
-      }
-      /* istanbul ignore next */
-      if (Object.defineProperty) {
-        Object.defineProperty(String, 'fromCodePoint', {
-          value: fromCodePoint,
-          configurable: true,
-          writable: true
-        })
-      } else {
-        String.fromCodePoint = fromCodePoint
-      }
-    }())
-  }
-})(typeof exports === 'undefined' ? this.sax = {} : exports)
-
-}).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":10,"stream":23,"string_decoder":58}],8:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -2599,9 +150,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],9:[function(require,module,exports){
+},{}],2:[function(require,module,exports){
 
-},{}],10:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -4382,7 +1933,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":8,"buffer":10,"ieee754":14}],11:[function(require,module,exports){
+},{"base64-js":1,"buffer":3,"ieee754":7}],4:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -4448,7 +1999,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],12:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -4947,7 +2498,7 @@ function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
   }
 }
 
-},{}],13:[function(require,module,exports){
+},{}],6:[function(require,module,exports){
 var http = require('http')
 var url = require('url')
 
@@ -4980,7 +2531,7 @@ function validateParams (params) {
   return params
 }
 
-},{"http":38,"url":60}],14:[function(require,module,exports){
+},{"http":37,"url":59}],7:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
@@ -5067,7 +2618,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],15:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -5096,7 +2647,893 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],16:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const stream_1 = require("stream");
+const sax_1 = __importDefault(require("sax"));
+const parse_time_1 = require("./parse-time");
+/**
+ * A wrapper around sax that emits segments.
+ */
+class DashMPDParser extends stream_1.Writable {
+    constructor(targetID) {
+        super();
+        this._parser = sax_1.default.createStream(false, { lowercase: true });
+        this._parser.on('error', this.destroy.bind(this));
+        let lastTag;
+        let currtime = 0;
+        let seq = 0;
+        let segmentTemplate;
+        let timescale, offset, duration, baseURL;
+        let timeline = [];
+        let getSegments = false;
+        let gotSegments = false;
+        let isStatic;
+        let treeLevel;
+        let periodStart;
+        const tmpl = (str) => {
+            const context = {
+                RepresentationID: targetID,
+                Number: seq,
+                Time: currtime,
+            };
+            return str.replace(/\$(\w+)\$/g, (m, p1) => `${context[p1]}`);
+        };
+        this._parser.on('opentag', node => {
+            switch (node.name) {
+                case 'mpd':
+                    currtime =
+                        node.attributes.availabilitystarttime ?
+                            new Date(node.attributes.availabilitystarttime).getTime() : 0;
+                    isStatic = node.attributes.type !== 'dynamic';
+                    break;
+                case 'period':
+                    // Reset everything on <Period> tag.
+                    seq = 0;
+                    timescale = 1000;
+                    duration = 0;
+                    offset = 0;
+                    baseURL = [];
+                    treeLevel = 0;
+                    periodStart = parse_time_1.durationStr(node.attributes.start) || 0;
+                    break;
+                case 'segmentlist':
+                    seq = parseInt(node.attributes.startnumber) || seq;
+                    timescale = parseInt(node.attributes.timescale) || timescale;
+                    duration = parseInt(node.attributes.duration) || duration;
+                    offset = parseInt(node.attributes.presentationtimeoffset) || offset;
+                    break;
+                case 'segmenttemplate':
+                    segmentTemplate = node.attributes;
+                    seq = parseInt(node.attributes.startnumber) || seq;
+                    timescale = parseInt(node.attributes.timescale) || timescale;
+                    break;
+                case 'segmenttimeline':
+                case 'baseurl':
+                    lastTag = node.name;
+                    break;
+                case 's':
+                    timeline.push({
+                        duration: parseInt(node.attributes.d),
+                        repeat: parseInt(node.attributes.r),
+                        time: parseInt(node.attributes.t),
+                    });
+                    break;
+                case 'adaptationset':
+                case 'representation':
+                    treeLevel++;
+                    if (!targetID) {
+                        targetID = node.attributes.id;
+                    }
+                    getSegments = node.attributes.id === `${targetID}`;
+                    if (getSegments) {
+                        if (periodStart) {
+                            currtime += periodStart;
+                        }
+                        if (offset) {
+                            currtime -= offset / timescale * 1000;
+                        }
+                        this.emit('starttime', currtime);
+                    }
+                    break;
+                case 'initialization':
+                    if (getSegments) {
+                        this.emit('item', {
+                            url: baseURL.filter(s => !!s).join('') + node.attributes.sourceurl,
+                            seq: seq,
+                            init: true,
+                            duration: 0,
+                        });
+                    }
+                    break;
+                case 'segmenturl':
+                    if (getSegments) {
+                        gotSegments = true;
+                        let tl = timeline.shift();
+                        let segmentDuration = ((tl === null || tl === void 0 ? void 0 : tl.duration) || duration) / timescale * 1000;
+                        this.emit('item', {
+                            url: baseURL.filter(s => !!s).join('') + node.attributes.media,
+                            seq: seq++,
+                            duration: segmentDuration,
+                        });
+                        currtime += segmentDuration;
+                    }
+                    break;
+            }
+        });
+        const onEnd = () => {
+            if (isStatic) {
+                this.emit('endlist');
+            }
+            if (!getSegments) {
+                this.destroy(Error(`Representation '${targetID}' not found`));
+            }
+            else {
+                this.emit('end');
+            }
+        };
+        this._parser.on('closetag', tagName => {
+            switch (tagName) {
+                case 'adaptationset':
+                case 'representation':
+                    treeLevel--;
+                    if (segmentTemplate && timeline.length) {
+                        gotSegments = true;
+                        if (segmentTemplate.initialization) {
+                            this.emit('item', {
+                                url: baseURL.filter(s => !!s).join('') +
+                                    tmpl(segmentTemplate.initialization),
+                                seq: seq,
+                                init: true,
+                                duration: 0,
+                            });
+                        }
+                        for (let { duration: itemDuration, repeat, time } of timeline) {
+                            itemDuration = itemDuration / timescale * 1000;
+                            repeat = repeat || 1;
+                            currtime = time || currtime;
+                            for (let i = 0; i < repeat; i++) {
+                                this.emit('item', {
+                                    url: baseURL.filter(s => !!s).join('') +
+                                        tmpl(segmentTemplate.media),
+                                    seq: seq++,
+                                    duration: itemDuration,
+                                });
+                                currtime += itemDuration;
+                            }
+                        }
+                    }
+                    if (gotSegments) {
+                        this.emit('endearly');
+                        onEnd();
+                        this._parser.removeAllListeners();
+                        this.removeAllListeners('finish');
+                    }
+                    break;
+            }
+        });
+        this._parser.on('text', text => {
+            if (lastTag === 'baseurl') {
+                baseURL[treeLevel] = text;
+                lastTag = null;
+            }
+        });
+        this.on('finish', onEnd);
+    }
+    _write(chunk, encoding, callback) {
+        this._parser.write(chunk, encoding);
+        callback();
+    }
+}
+exports.default = DashMPDParser;
+
+},{"./parse-time":12,"sax":21,"stream":22}],10:[function(require,module,exports){
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+const stream_1 = require("stream");
+const miniget_1 = __importDefault(require("miniget"));
+const m3u8_parser_1 = __importDefault(require("./m3u8-parser"));
+const dash_mpd_parser_1 = __importDefault(require("./dash-mpd-parser"));
+const queue_1 = require("./queue");
+const parse_time_1 = require("./parse-time");
+const supportedParsers = {
+    m3u8: m3u8_parser_1.default,
+    'dash-mpd': dash_mpd_parser_1.default,
+};
+let m3u8stream = ((playlistURL, options = {}) => {
+    const stream = new stream_1.PassThrough();
+    const chunkReadahead = options.chunkReadahead || 3;
+    // 20 seconds.
+    const liveBuffer = options.liveBuffer || 20000;
+    const requestOptions = options.requestOptions;
+    const Parser = supportedParsers[options.parser || (/\.mpd$/.test(playlistURL) ? 'dash-mpd' : 'm3u8')];
+    if (!Parser) {
+        throw TypeError(`parser '${options.parser}' not supported`);
+    }
+    let begin = 0;
+    if (typeof options.begin !== 'undefined') {
+        begin = typeof options.begin === 'string' ?
+            parse_time_1.humanStr(options.begin) :
+            Math.max(options.begin - liveBuffer, 0);
+    }
+    const forwardEvents = (req) => {
+        for (let event of ['abort', 'request', 'response', 'redirect', 'retry', 'reconnect']) {
+            req.on(event, stream.emit.bind(stream, event));
+        }
+    };
+    let currSegment;
+    const streamQueue = new queue_1.Queue((req, callback) => {
+        currSegment = req;
+        // Count the size manually, since the `content-length` header is not
+        // always there.
+        let size = 0;
+        req.on('data', (chunk) => size += chunk.length);
+        req.pipe(stream, { end: false });
+        req.on('end', () => callback(null, size));
+    }, { concurrency: 1 });
+    let segmentNumber = 0;
+    let downloaded = 0;
+    const requestQueue = new queue_1.Queue((segment, callback) => {
+        let reqOptions = Object.assign({}, requestOptions);
+        if (segment.range) {
+            reqOptions.headers = Object.assign({}, reqOptions.headers, {
+                Range: `bytes=${segment.range.start}-${segment.range.end}`,
+            });
+        }
+        let req = miniget_1.default(new URL(segment.url, playlistURL).toString(), reqOptions);
+        req.on('error', callback);
+        forwardEvents(req);
+        streamQueue.push(req, (_, size) => {
+            downloaded += +size;
+            stream.emit('progress', {
+                num: ++segmentNumber,
+                size: size,
+                duration: segment.duration,
+                url: segment.url,
+            }, requestQueue.total, downloaded);
+            callback(null);
+        });
+    }, { concurrency: chunkReadahead });
+    const onError = (err) => {
+        if (ended) {
+            return;
+        }
+        stream.emit('error', err);
+        // Stop on any error.
+        stream.end();
+    };
+    // When to look for items again.
+    let refreshThreshold;
+    let minRefreshTime;
+    let refreshTimeout;
+    let fetchingPlaylist = true;
+    let ended = false;
+    let isStatic = false;
+    let lastRefresh;
+    const onQueuedEnd = (err) => {
+        currSegment = null;
+        if (err) {
+            onError(err);
+        }
+        else if (!fetchingPlaylist && !ended && !isStatic &&
+            requestQueue.tasks.length + requestQueue.active <= refreshThreshold) {
+            let ms = Math.max(0, minRefreshTime - (Date.now() - lastRefresh));
+            fetchingPlaylist = true;
+            refreshTimeout = setTimeout(refreshPlaylist, ms);
+        }
+        else if ((ended || isStatic) &&
+            !requestQueue.tasks.length && !requestQueue.active) {
+            stream.end();
+        }
+    };
+    let currPlaylist;
+    let lastSeq;
+    let starttime = 0;
+    const refreshPlaylist = () => {
+        lastRefresh = Date.now();
+        currPlaylist = miniget_1.default(playlistURL, requestOptions);
+        currPlaylist.on('error', onError);
+        forwardEvents(currPlaylist);
+        const parser = currPlaylist.pipe(new Parser(options.id));
+        parser.on('starttime', (a) => {
+            if (starttime) {
+                return;
+            }
+            starttime = a;
+            if (typeof options.begin === 'string' && begin >= 0) {
+                begin += starttime;
+            }
+        });
+        parser.on('endlist', () => { isStatic = true; });
+        parser.on('endearly', currPlaylist.unpipe.bind(currPlaylist, parser));
+        let addedItems = [];
+        const addItem = (item) => {
+            if (!item.init) {
+                if (item.seq <= lastSeq) {
+                    return;
+                }
+                lastSeq = item.seq;
+            }
+            begin = item.time;
+            requestQueue.push(item, onQueuedEnd);
+            addedItems.push(item);
+        };
+        let tailedItems = [], tailedItemsDuration = 0;
+        parser.on('item', (item) => {
+            let timedItem = Object.assign({ time: starttime }, item);
+            if (begin <= timedItem.time) {
+                addItem(timedItem);
+            }
+            else {
+                tailedItems.push(timedItem);
+                tailedItemsDuration += timedItem.duration;
+                // Only keep the last `liveBuffer` of items.
+                while (tailedItems.length > 1 &&
+                    tailedItemsDuration - tailedItems[0].duration > liveBuffer) {
+                    const lastItem = tailedItems.shift();
+                    tailedItemsDuration -= lastItem.duration;
+                }
+            }
+            starttime += timedItem.duration;
+        });
+        parser.on('end', () => {
+            currPlaylist = null;
+            // If we are too ahead of the stream, make sure to get the
+            // latest available items with a small buffer.
+            if (!addedItems.length && tailedItems.length) {
+                tailedItems.forEach(item => { addItem(item); });
+            }
+            // Refresh the playlist when remaining segments get low.
+            refreshThreshold = Math.max(1, Math.ceil(addedItems.length * 0.01));
+            // Throttle refreshing the playlist by looking at the duration
+            // of live items added on this refresh.
+            minRefreshTime =
+                addedItems.reduce((total, item) => item.duration + total, 0);
+            fetchingPlaylist = false;
+            onQueuedEnd(null);
+        });
+    };
+    refreshPlaylist();
+    stream.end = () => {
+        ended = true;
+        streamQueue.die();
+        requestQueue.die();
+        clearTimeout(refreshTimeout);
+        currPlaylist === null || currPlaylist === void 0 ? void 0 : currPlaylist.destroy();
+        currSegment === null || currSegment === void 0 ? void 0 : currSegment.destroy();
+        stream_1.PassThrough.prototype.end.call(stream, null);
+    };
+    return stream;
+});
+m3u8stream.parseTimestamp = parse_time_1.humanStr;
+module.exports = m3u8stream;
+
+},{"./dash-mpd-parser":9,"./m3u8-parser":11,"./parse-time":12,"./queue":13,"miniget":14,"stream":22}],11:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const stream_1 = require("stream");
+/**
+ * A very simple m3u8 playlist file parser that detects tags and segments.
+ */
+class m3u8Parser extends stream_1.Writable {
+    constructor() {
+        super();
+        this._lastLine = '';
+        this._seq = 0;
+        this._nextItemDuration = null;
+        this._nextItemRange = null;
+        this._lastItemRangeEnd = 0;
+        this.on('finish', () => {
+            this._parseLine(this._lastLine);
+            this.emit('end');
+        });
+    }
+    _parseAttrList(value) {
+        let attrs = {};
+        let regex = /([A-Z0-9-]+)=(?:"([^"]*?)"|([^,]*?))/g;
+        let match;
+        while ((match = regex.exec(value)) !== null) {
+            attrs[match[1]] = match[2] || match[3];
+        }
+        return attrs;
+    }
+    _parseRange(value) {
+        if (!value)
+            return null;
+        let svalue = value.split('@');
+        let start = svalue[1] ? parseInt(svalue[1]) : this._lastItemRangeEnd + 1;
+        let end = start + parseInt(svalue[0]) - 1;
+        let range = { start, end };
+        this._lastItemRangeEnd = range.end;
+        return range;
+    }
+    _parseLine(line) {
+        let match = line.match(/^#(EXT[A-Z0-9-]+)(?::(.*))?/);
+        if (match) {
+            // This is a tag.
+            const tag = match[1];
+            const value = match[2] || '';
+            switch (tag) {
+                case 'EXT-X-PROGRAM-DATE-TIME':
+                    this.emit('starttime', new Date(value).getTime());
+                    break;
+                case 'EXT-X-MEDIA-SEQUENCE':
+                    this._seq = parseInt(value);
+                    break;
+                case 'EXT-X-MAP': {
+                    let attrs = this._parseAttrList(value);
+                    if (!attrs.URI) {
+                        this.destroy(new Error('`EXT-X-MAP` found without required attribute `URI`'));
+                        return;
+                    }
+                    this.emit('item', {
+                        url: attrs.URI,
+                        seq: this._seq,
+                        init: true,
+                        duration: 0,
+                        range: this._parseRange(attrs.BYTERANGE),
+                    });
+                    break;
+                }
+                case 'EXT-X-BYTERANGE': {
+                    this._nextItemRange = this._parseRange(value);
+                    break;
+                }
+                case 'EXTINF':
+                    this._nextItemDuration =
+                        Math.round(parseFloat(value.split(',')[0]) * 1000);
+                    break;
+                case 'EXT-X-ENDLIST':
+                    this.emit('endlist');
+                    break;
+            }
+        }
+        else if (!/^#/.test(line) && line.trim()) {
+            // This is a segment
+            this.emit('item', {
+                url: line.trim(),
+                seq: this._seq++,
+                duration: this._nextItemDuration,
+                range: this._nextItemRange,
+            });
+            this._nextItemRange = null;
+        }
+    }
+    _write(chunk, encoding, callback) {
+        let lines = chunk.toString('utf8').split('\n');
+        if (this._lastLine) {
+            lines[0] = this._lastLine + lines[0];
+        }
+        lines.forEach((line, i) => {
+            if (this.destroyed)
+                return;
+            if (i < lines.length - 1) {
+                this._parseLine(line);
+            }
+            else {
+                // Save the last line in case it has been broken up.
+                this._lastLine = line;
+            }
+        });
+        callback();
+    }
+}
+exports.default = m3u8Parser;
+
+},{"stream":22}],12:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.durationStr = exports.humanStr = void 0;
+const numberFormat = /^\d+$/;
+const timeFormat = /^(?:(?:(\d+):)?(\d{1,2}):)?(\d{1,2})(?:\.(\d{3}))?$/;
+const timeUnits = {
+    ms: 1,
+    s: 1000,
+    m: 60000,
+    h: 3600000,
+};
+/**
+ * Converts human friendly time to milliseconds. Supports the format
+ * 00:00:00.000 for hours, minutes, seconds, and milliseconds respectively.
+ * And 0ms, 0s, 0m, 0h, and together 1m1s.
+ *
+ * @param {number|string} time
+ * @returns {number}
+ */
+exports.humanStr = (time) => {
+    if (typeof time === 'number') {
+        return time;
+    }
+    if (numberFormat.test(time)) {
+        return +time;
+    }
+    const firstFormat = timeFormat.exec(time);
+    if (firstFormat) {
+        return (+(firstFormat[1] || 0) * timeUnits.h) +
+            (+(firstFormat[2] || 0) * timeUnits.m) +
+            (+firstFormat[3] * timeUnits.s) +
+            +(firstFormat[4] || 0);
+    }
+    else {
+        let total = 0;
+        const r = /(-?\d+)(ms|s|m|h)/g;
+        let rs;
+        while ((rs = r.exec(time)) !== null) {
+            total += +rs[1] * timeUnits[rs[2]];
+        }
+        return total;
+    }
+};
+/**
+ * Parses a duration string in the form of "123.456S", returns milliseconds.
+ *
+ * @param {string} time
+ * @returns {number}
+ */
+exports.durationStr = (time) => {
+    let total = 0;
+    const r = /(\d+(?:\.\d+)?)(S|M|H)/g;
+    let rs;
+    while ((rs = r.exec(time)) !== null) {
+        total += +rs[1] * timeUnits[rs[2].toLowerCase()];
+    }
+    return total;
+};
+
+},{}],13:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Queue = void 0;
+class Queue {
+    /**
+     * A really simple queue with concurrency.
+     *
+     * @param {Function} worker
+     * @param {Object} options
+     * @param {!number} options.concurrency
+     */
+    constructor(worker, options = {}) {
+        this._worker = worker;
+        this._concurrency = options.concurrency || 1;
+        this.tasks = [];
+        this.total = 0;
+        this.active = 0;
+    }
+    /**
+     * Push a task to the queue.
+     *
+     *  @param {T} item
+     *  @param {!Function} callback
+     */
+    push(item, callback) {
+        this.tasks.push({ item, callback });
+        this.total++;
+        this._next();
+    }
+    /**
+     * Process next job in queue.
+     */
+    _next() {
+        if (this.active >= this._concurrency || !this.tasks.length) {
+            return;
+        }
+        const { item, callback } = this.tasks.shift();
+        let callbackCalled = false;
+        this.active++;
+        this._worker(item, (err, result) => {
+            if (callbackCalled) {
+                return;
+            }
+            this.active--;
+            callbackCalled = true;
+            callback === null || callback === void 0 ? void 0 : callback(err, result);
+            this._next();
+        });
+    }
+    /**
+     * Stops processing queued jobs.
+     */
+    die() {
+        this.tasks = [];
+    }
+}
+exports.Queue = Queue;
+
+},{}],14:[function(require,module,exports){
+(function (process){(function (){
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
+const stream_1 = require("stream");
+const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
+const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
+const retryStatusCodes = new Set([429, 503]);
+// `request`, `response`, `abort`, left out, miniget will emit these.
+const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
+const responseEvents = ['aborted'];
+Miniget.MinigetError = class MinigetError extends Error {
+    constructor(message, statusCode) {
+        super(message);
+        this.statusCode = statusCode;
+    }
+};
+Miniget.defaultOptions = {
+    maxRedirects: 10,
+    maxRetries: 2,
+    maxReconnects: 0,
+    backoff: { inc: 100, max: 10000 },
+};
+function Miniget(url, options = {}) {
+    var _a;
+    const opts = Object.assign({}, Miniget.defaultOptions, options);
+    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
+    stream.destroyed = stream.aborted = false;
+    let activeRequest;
+    let activeResponse;
+    let activeDecodedStream;
+    let redirects = 0;
+    let retries = 0;
+    let retryTimeout;
+    let reconnects = 0;
+    let contentLength;
+    let acceptRanges = false;
+    let rangeStart = 0, rangeEnd;
+    let downloaded = 0;
+    // Check if this is a ranged request.
+    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
+        let r = /bytes=(\d+)-(\d+)?/.exec(`${opts.headers.Range}`);
+        if (r) {
+            rangeStart = parseInt(r[1], 10);
+            rangeEnd = parseInt(r[2], 10);
+        }
+    }
+    // Add `Accept-Encoding` header.
+    if (opts.acceptEncoding) {
+        opts.headers = Object.assign({
+            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', '),
+        }, opts.headers);
+    }
+    const downloadHasStarted = () => activeDecodedStream && downloaded > 0;
+    const downloadComplete = () => !acceptRanges || downloaded === contentLength;
+    const reconnect = (err) => {
+        activeDecodedStream = null;
+        retries = 0;
+        let inc = opts.backoff.inc;
+        let ms = Math.min(inc, opts.backoff.max);
+        retryTimeout = setTimeout(doDownload, ms);
+        stream.emit('reconnect', reconnects, err);
+    };
+    const reconnectIfEndedEarly = (err) => {
+        if (options.method !== 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
+            reconnect(err);
+            return true;
+        }
+        return false;
+    };
+    const retryRequest = (retryOptions) => {
+        if (stream.destroyed) {
+            return false;
+        }
+        if (downloadHasStarted()) {
+            return reconnectIfEndedEarly(retryOptions.err);
+        }
+        else if ((!retryOptions.err || retryOptions.err.message === 'ENOTFOUND') &&
+            retries++ < opts.maxRetries) {
+            let ms = retryOptions.retryAfter ||
+                Math.min(retries * opts.backoff.inc, opts.backoff.max);
+            retryTimeout = setTimeout(doDownload, ms);
+            stream.emit('retry', retries, retryOptions.err);
+            return true;
+        }
+        return false;
+    };
+    const forwardEvents = (ee, events) => {
+        for (let event of events) {
+            ee.on(event, stream.emit.bind(stream, event));
+        }
+    };
+    const doDownload = () => {
+        let parsed = {}, httpLib;
+        try {
+            let urlObj = typeof url === 'string' ? new URL(url) : url;
+            parsed = Object.assign({}, {
+                host: urlObj.host,
+                hostname: urlObj.hostname,
+                path: urlObj.pathname + urlObj.search + urlObj.hash,
+                port: urlObj.port,
+                protocol: urlObj.protocol,
+            });
+            if (urlObj.username) {
+                parsed.auth = `${urlObj.username}:${urlObj.password}`;
+            }
+            httpLib = httpLibs[String(parsed.protocol)];
+        }
+        catch (err) {
+            // Let the error be caught by the if statement below.
+        }
+        if (!httpLib) {
+            stream.emit('error', new Miniget.MinigetError(`Invalid URL: ${url}`));
+            return;
+        }
+        Object.assign(parsed, opts);
+        if (acceptRanges && downloaded > 0) {
+            let start = downloaded + rangeStart;
+            let end = rangeEnd || '';
+            parsed.headers = Object.assign({}, parsed.headers, {
+                Range: `bytes=${start}-${end}`,
+            });
+        }
+        if (opts.transform) {
+            try {
+                parsed = opts.transform(parsed);
+            }
+            catch (err) {
+                stream.emit('error', err);
+                return;
+            }
+            if (!parsed || parsed.protocol) {
+                httpLib = httpLibs[String(parsed === null || parsed === void 0 ? void 0 : parsed.protocol)];
+                if (!httpLib) {
+                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
+                    return;
+                }
+            }
+        }
+        const onError = (err) => {
+            if (stream.destroyed || stream.readableEnded) {
+                return;
+            }
+            // Needed for node v10.
+            if (stream._readableState.ended) {
+                return;
+            }
+            cleanup();
+            if (!retryRequest({ err })) {
+                stream.emit('error', err);
+            }
+            else {
+                activeRequest.removeListener('close', onRequestClose);
+            }
+        };
+        const onRequestClose = () => {
+            cleanup();
+            retryRequest({});
+        };
+        const cleanup = () => {
+            activeRequest.removeListener('close', onRequestClose);
+            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
+            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
+        };
+        const onData = (chunk) => { downloaded += chunk.length; };
+        const onEnd = () => {
+            cleanup();
+            if (!reconnectIfEndedEarly()) {
+                stream.end();
+            }
+        };
+        activeRequest = httpLib.request(parsed, (res) => {
+            // Needed for node v10, v12.
+            // istanbul ignore next
+            if (stream.destroyed) {
+                return;
+            }
+            if (redirectStatusCodes.has(res.statusCode)) {
+                if (redirects++ >= opts.maxRedirects) {
+                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
+                }
+                else {
+                    if (res.headers.location) {
+                        url = res.headers.location;
+                    }
+                    else {
+                        let err = new Miniget.MinigetError('Redirect status code given with no location', res.statusCode);
+                        stream.emit('error', err);
+                        cleanup();
+                        return;
+                    }
+                    setTimeout(doDownload, parseInt(res.headers['retry-after'] || '0', 10) * 1000);
+                    stream.emit('redirect', url);
+                }
+                cleanup();
+                return;
+                // Check for rate limiting.
+            }
+            else if (retryStatusCodes.has(res.statusCode)) {
+                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'] || '0', 10) })) {
+                    let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            else if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
+                let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
+                if (res.statusCode >= 500) {
+                    onError(err);
+                }
+                else {
+                    stream.emit('error', err);
+                }
+                cleanup();
+                return;
+            }
+            activeDecodedStream = res;
+            if (opts.acceptEncoding && res.headers['content-encoding']) {
+                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
+                    let fn = opts.acceptEncoding[enc];
+                    if (fn) {
+                        activeDecodedStream = activeDecodedStream.pipe(fn());
+                        activeDecodedStream.on('error', onError);
+                    }
+                }
+            }
+            if (!contentLength) {
+                contentLength = parseInt(`${res.headers['content-length']}`, 10);
+                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
+                    contentLength > 0 && opts.maxReconnects > 0;
+            }
+            res.on('data', onData);
+            activeDecodedStream.on('end', onEnd);
+            activeDecodedStream.pipe(stream, { end: !acceptRanges });
+            activeResponse = res;
+            stream.emit('response', res);
+            res.on('error', onError);
+            forwardEvents(res, responseEvents);
+        });
+        activeRequest.on('error', onError);
+        activeRequest.on('close', onRequestClose);
+        forwardEvents(activeRequest, requestEvents);
+        if (stream.destroyed) {
+            streamDestroy(...destroyArgs);
+        }
+        stream.emit('request', activeRequest);
+        activeRequest.end();
+    };
+    stream.abort = (err) => {
+        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
+        stream.aborted = true;
+        stream.emit('abort');
+        stream.destroy(err);
+    };
+    let destroyArgs;
+    const streamDestroy = (err) => {
+        activeRequest.destroy(err);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
+        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
+        clearTimeout(retryTimeout);
+    };
+    stream._destroy = (...args) => {
+        stream.destroyed = true;
+        if (activeRequest) {
+            streamDestroy(...args);
+        }
+        else {
+            destroyArgs = args;
+        }
+    };
+    stream.text = () => new Promise((resolve, reject) => {
+        let body = '';
+        stream.setEncoding('utf8');
+        stream.on('data', chunk => body += chunk);
+        stream.on('end', () => resolve(body));
+        stream.on('error', reject);
+    });
+    process.nextTick(doDownload);
+    return stream;
+}
+module.exports = Miniget;
+
+}).call(this)}).call(this,require('_process'))
+},{"_process":15,"http":37,"https":6,"stream":22}],15:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -5282,7 +3719,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],17:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 (function (global){(function (){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -5819,7 +4256,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],18:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -5905,7 +4342,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],19:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -5992,13 +4429,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],20:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":18,"./encode":19}],21:[function(require,module,exports){
+},{"./decode":17,"./encode":18}],20:[function(require,module,exports){
 /*! safe-buffer. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
@@ -6065,9 +4502,1576 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":10}],22:[function(require,module,exports){
-arguments[4][7][0].apply(exports,arguments)
-},{"buffer":10,"dup":7,"stream":23,"string_decoder":58}],23:[function(require,module,exports){
+},{"buffer":3}],21:[function(require,module,exports){
+(function (Buffer){(function (){
+;(function (sax) { // wrapper for non-node envs
+  sax.parser = function (strict, opt) { return new SAXParser(strict, opt) }
+  sax.SAXParser = SAXParser
+  sax.SAXStream = SAXStream
+  sax.createStream = createStream
+
+  // When we pass the MAX_BUFFER_LENGTH position, start checking for buffer overruns.
+  // When we check, schedule the next check for MAX_BUFFER_LENGTH - (max(buffer lengths)),
+  // since that's the earliest that a buffer overrun could occur.  This way, checks are
+  // as rare as required, but as often as necessary to ensure never crossing this bound.
+  // Furthermore, buffers are only tested at most once per write(), so passing a very
+  // large string into write() might have undesirable effects, but this is manageable by
+  // the caller, so it is assumed to be safe.  Thus, a call to write() may, in the extreme
+  // edge case, result in creating at most one complete copy of the string passed in.
+  // Set to Infinity to have unlimited buffers.
+  sax.MAX_BUFFER_LENGTH = 64 * 1024
+
+  var buffers = [
+    'comment', 'sgmlDecl', 'textNode', 'tagName', 'doctype',
+    'procInstName', 'procInstBody', 'entity', 'attribName',
+    'attribValue', 'cdata', 'script'
+  ]
+
+  sax.EVENTS = [
+    'text',
+    'processinginstruction',
+    'sgmldeclaration',
+    'doctype',
+    'comment',
+    'opentagstart',
+    'attribute',
+    'opentag',
+    'closetag',
+    'opencdata',
+    'cdata',
+    'closecdata',
+    'error',
+    'end',
+    'ready',
+    'script',
+    'opennamespace',
+    'closenamespace'
+  ]
+
+  function SAXParser (strict, opt) {
+    if (!(this instanceof SAXParser)) {
+      return new SAXParser(strict, opt)
+    }
+
+    var parser = this
+    clearBuffers(parser)
+    parser.q = parser.c = ''
+    parser.bufferCheckPosition = sax.MAX_BUFFER_LENGTH
+    parser.opt = opt || {}
+    parser.opt.lowercase = parser.opt.lowercase || parser.opt.lowercasetags
+    parser.looseCase = parser.opt.lowercase ? 'toLowerCase' : 'toUpperCase'
+    parser.tags = []
+    parser.closed = parser.closedRoot = parser.sawRoot = false
+    parser.tag = parser.error = null
+    parser.strict = !!strict
+    parser.noscript = !!(strict || parser.opt.noscript)
+    parser.state = S.BEGIN
+    parser.strictEntities = parser.opt.strictEntities
+    parser.ENTITIES = parser.strictEntities ? Object.create(sax.XML_ENTITIES) : Object.create(sax.ENTITIES)
+    parser.attribList = []
+
+    // namespaces form a prototype chain.
+    // it always points at the current tag,
+    // which protos to its parent tag.
+    if (parser.opt.xmlns) {
+      parser.ns = Object.create(rootNS)
+    }
+
+    // mostly just for error reporting
+    parser.trackPosition = parser.opt.position !== false
+    if (parser.trackPosition) {
+      parser.position = parser.line = parser.column = 0
+    }
+    emit(parser, 'onready')
+  }
+
+  if (!Object.create) {
+    Object.create = function (o) {
+      function F () {}
+      F.prototype = o
+      var newf = new F()
+      return newf
+    }
+  }
+
+  if (!Object.keys) {
+    Object.keys = function (o) {
+      var a = []
+      for (var i in o) if (o.hasOwnProperty(i)) a.push(i)
+      return a
+    }
+  }
+
+  function checkBufferLength (parser) {
+    var maxAllowed = Math.max(sax.MAX_BUFFER_LENGTH, 10)
+    var maxActual = 0
+    for (var i = 0, l = buffers.length; i < l; i++) {
+      var len = parser[buffers[i]].length
+      if (len > maxAllowed) {
+        // Text/cdata nodes can get big, and since they're buffered,
+        // we can get here under normal conditions.
+        // Avoid issues by emitting the text node now,
+        // so at least it won't get any bigger.
+        switch (buffers[i]) {
+          case 'textNode':
+            closeText(parser)
+            break
+
+          case 'cdata':
+            emitNode(parser, 'oncdata', parser.cdata)
+            parser.cdata = ''
+            break
+
+          case 'script':
+            emitNode(parser, 'onscript', parser.script)
+            parser.script = ''
+            break
+
+          default:
+            error(parser, 'Max buffer length exceeded: ' + buffers[i])
+        }
+      }
+      maxActual = Math.max(maxActual, len)
+    }
+    // schedule the next check for the earliest possible buffer overrun.
+    var m = sax.MAX_BUFFER_LENGTH - maxActual
+    parser.bufferCheckPosition = m + parser.position
+  }
+
+  function clearBuffers (parser) {
+    for (var i = 0, l = buffers.length; i < l; i++) {
+      parser[buffers[i]] = ''
+    }
+  }
+
+  function flushBuffers (parser) {
+    closeText(parser)
+    if (parser.cdata !== '') {
+      emitNode(parser, 'oncdata', parser.cdata)
+      parser.cdata = ''
+    }
+    if (parser.script !== '') {
+      emitNode(parser, 'onscript', parser.script)
+      parser.script = ''
+    }
+  }
+
+  SAXParser.prototype = {
+    end: function () { end(this) },
+    write: write,
+    resume: function () { this.error = null; return this },
+    close: function () { return this.write(null) },
+    flush: function () { flushBuffers(this) }
+  }
+
+  var Stream
+  try {
+    Stream = require('stream').Stream
+  } catch (ex) {
+    Stream = function () {}
+  }
+
+  var streamWraps = sax.EVENTS.filter(function (ev) {
+    return ev !== 'error' && ev !== 'end'
+  })
+
+  function createStream (strict, opt) {
+    return new SAXStream(strict, opt)
+  }
+
+  function SAXStream (strict, opt) {
+    if (!(this instanceof SAXStream)) {
+      return new SAXStream(strict, opt)
+    }
+
+    Stream.apply(this)
+
+    this._parser = new SAXParser(strict, opt)
+    this.writable = true
+    this.readable = true
+
+    var me = this
+
+    this._parser.onend = function () {
+      me.emit('end')
+    }
+
+    this._parser.onerror = function (er) {
+      me.emit('error', er)
+
+      // if didn't throw, then means error was handled.
+      // go ahead and clear error, so we can write again.
+      me._parser.error = null
+    }
+
+    this._decoder = null
+
+    streamWraps.forEach(function (ev) {
+      Object.defineProperty(me, 'on' + ev, {
+        get: function () {
+          return me._parser['on' + ev]
+        },
+        set: function (h) {
+          if (!h) {
+            me.removeAllListeners(ev)
+            me._parser['on' + ev] = h
+            return h
+          }
+          me.on(ev, h)
+        },
+        enumerable: true,
+        configurable: false
+      })
+    })
+  }
+
+  SAXStream.prototype = Object.create(Stream.prototype, {
+    constructor: {
+      value: SAXStream
+    }
+  })
+
+  SAXStream.prototype.write = function (data) {
+    if (typeof Buffer === 'function' &&
+      typeof Buffer.isBuffer === 'function' &&
+      Buffer.isBuffer(data)) {
+      if (!this._decoder) {
+        var SD = require('string_decoder').StringDecoder
+        this._decoder = new SD('utf8')
+      }
+      data = this._decoder.write(data)
+    }
+
+    this._parser.write(data.toString())
+    this.emit('data', data)
+    return true
+  }
+
+  SAXStream.prototype.end = function (chunk) {
+    if (chunk && chunk.length) {
+      this.write(chunk)
+    }
+    this._parser.end()
+    return true
+  }
+
+  SAXStream.prototype.on = function (ev, handler) {
+    var me = this
+    if (!me._parser['on' + ev] && streamWraps.indexOf(ev) !== -1) {
+      me._parser['on' + ev] = function () {
+        var args = arguments.length === 1 ? [arguments[0]] : Array.apply(null, arguments)
+        args.splice(0, 0, ev)
+        me.emit.apply(me, args)
+      }
+    }
+
+    return Stream.prototype.on.call(me, ev, handler)
+  }
+
+  // this really needs to be replaced with character classes.
+  // XML allows all manner of ridiculous numbers and digits.
+  var CDATA = '[CDATA['
+  var DOCTYPE = 'DOCTYPE'
+  var XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace'
+  var XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/'
+  var rootNS = { xml: XML_NAMESPACE, xmlns: XMLNS_NAMESPACE }
+
+  // http://www.w3.org/TR/REC-xml/#NT-NameStartChar
+  // This implementation works on strings, a single character at a time
+  // as such, it cannot ever support astral-plane characters (10000-EFFFF)
+  // without a significant breaking change to either this  parser, or the
+  // JavaScript language.  Implementation of an emoji-capable xml parser
+  // is left as an exercise for the reader.
+  var nameStart = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/
+
+  var nameBody = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/
+
+  var entityStart = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/
+  var entityBody = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/
+
+  function isWhitespace (c) {
+    return c === ' ' || c === '\n' || c === '\r' || c === '\t'
+  }
+
+  function isQuote (c) {
+    return c === '"' || c === '\''
+  }
+
+  function isAttribEnd (c) {
+    return c === '>' || isWhitespace(c)
+  }
+
+  function isMatch (regex, c) {
+    return regex.test(c)
+  }
+
+  function notMatch (regex, c) {
+    return !isMatch(regex, c)
+  }
+
+  var S = 0
+  sax.STATE = {
+    BEGIN: S++, // leading byte order mark or whitespace
+    BEGIN_WHITESPACE: S++, // leading whitespace
+    TEXT: S++, // general stuff
+    TEXT_ENTITY: S++, // &amp and such.
+    OPEN_WAKA: S++, // <
+    SGML_DECL: S++, // <!BLARG
+    SGML_DECL_QUOTED: S++, // <!BLARG foo "bar
+    DOCTYPE: S++, // <!DOCTYPE
+    DOCTYPE_QUOTED: S++, // <!DOCTYPE "//blah
+    DOCTYPE_DTD: S++, // <!DOCTYPE "//blah" [ ...
+    DOCTYPE_DTD_QUOTED: S++, // <!DOCTYPE "//blah" [ "foo
+    COMMENT_STARTING: S++, // <!-
+    COMMENT: S++, // <!--
+    COMMENT_ENDING: S++, // <!-- blah -
+    COMMENT_ENDED: S++, // <!-- blah --
+    CDATA: S++, // <![CDATA[ something
+    CDATA_ENDING: S++, // ]
+    CDATA_ENDING_2: S++, // ]]
+    PROC_INST: S++, // <?hi
+    PROC_INST_BODY: S++, // <?hi there
+    PROC_INST_ENDING: S++, // <?hi "there" ?
+    OPEN_TAG: S++, // <strong
+    OPEN_TAG_SLASH: S++, // <strong /
+    ATTRIB: S++, // <a
+    ATTRIB_NAME: S++, // <a foo
+    ATTRIB_NAME_SAW_WHITE: S++, // <a foo _
+    ATTRIB_VALUE: S++, // <a foo=
+    ATTRIB_VALUE_QUOTED: S++, // <a foo="bar
+    ATTRIB_VALUE_CLOSED: S++, // <a foo="bar"
+    ATTRIB_VALUE_UNQUOTED: S++, // <a foo=bar
+    ATTRIB_VALUE_ENTITY_Q: S++, // <foo bar="&quot;"
+    ATTRIB_VALUE_ENTITY_U: S++, // <foo bar=&quot
+    CLOSE_TAG: S++, // </a
+    CLOSE_TAG_SAW_WHITE: S++, // </a   >
+    SCRIPT: S++, // <script> ...
+    SCRIPT_ENDING: S++ // <script> ... <
+  }
+
+  sax.XML_ENTITIES = {
+    'amp': '&',
+    'gt': '>',
+    'lt': '<',
+    'quot': '"',
+    'apos': "'"
+  }
+
+  sax.ENTITIES = {
+    'amp': '&',
+    'gt': '>',
+    'lt': '<',
+    'quot': '"',
+    'apos': "'",
+    'AElig': 198,
+    'Aacute': 193,
+    'Acirc': 194,
+    'Agrave': 192,
+    'Aring': 197,
+    'Atilde': 195,
+    'Auml': 196,
+    'Ccedil': 199,
+    'ETH': 208,
+    'Eacute': 201,
+    'Ecirc': 202,
+    'Egrave': 200,
+    'Euml': 203,
+    'Iacute': 205,
+    'Icirc': 206,
+    'Igrave': 204,
+    'Iuml': 207,
+    'Ntilde': 209,
+    'Oacute': 211,
+    'Ocirc': 212,
+    'Ograve': 210,
+    'Oslash': 216,
+    'Otilde': 213,
+    'Ouml': 214,
+    'THORN': 222,
+    'Uacute': 218,
+    'Ucirc': 219,
+    'Ugrave': 217,
+    'Uuml': 220,
+    'Yacute': 221,
+    'aacute': 225,
+    'acirc': 226,
+    'aelig': 230,
+    'agrave': 224,
+    'aring': 229,
+    'atilde': 227,
+    'auml': 228,
+    'ccedil': 231,
+    'eacute': 233,
+    'ecirc': 234,
+    'egrave': 232,
+    'eth': 240,
+    'euml': 235,
+    'iacute': 237,
+    'icirc': 238,
+    'igrave': 236,
+    'iuml': 239,
+    'ntilde': 241,
+    'oacute': 243,
+    'ocirc': 244,
+    'ograve': 242,
+    'oslash': 248,
+    'otilde': 245,
+    'ouml': 246,
+    'szlig': 223,
+    'thorn': 254,
+    'uacute': 250,
+    'ucirc': 251,
+    'ugrave': 249,
+    'uuml': 252,
+    'yacute': 253,
+    'yuml': 255,
+    'copy': 169,
+    'reg': 174,
+    'nbsp': 160,
+    'iexcl': 161,
+    'cent': 162,
+    'pound': 163,
+    'curren': 164,
+    'yen': 165,
+    'brvbar': 166,
+    'sect': 167,
+    'uml': 168,
+    'ordf': 170,
+    'laquo': 171,
+    'not': 172,
+    'shy': 173,
+    'macr': 175,
+    'deg': 176,
+    'plusmn': 177,
+    'sup1': 185,
+    'sup2': 178,
+    'sup3': 179,
+    'acute': 180,
+    'micro': 181,
+    'para': 182,
+    'middot': 183,
+    'cedil': 184,
+    'ordm': 186,
+    'raquo': 187,
+    'frac14': 188,
+    'frac12': 189,
+    'frac34': 190,
+    'iquest': 191,
+    'times': 215,
+    'divide': 247,
+    'OElig': 338,
+    'oelig': 339,
+    'Scaron': 352,
+    'scaron': 353,
+    'Yuml': 376,
+    'fnof': 402,
+    'circ': 710,
+    'tilde': 732,
+    'Alpha': 913,
+    'Beta': 914,
+    'Gamma': 915,
+    'Delta': 916,
+    'Epsilon': 917,
+    'Zeta': 918,
+    'Eta': 919,
+    'Theta': 920,
+    'Iota': 921,
+    'Kappa': 922,
+    'Lambda': 923,
+    'Mu': 924,
+    'Nu': 925,
+    'Xi': 926,
+    'Omicron': 927,
+    'Pi': 928,
+    'Rho': 929,
+    'Sigma': 931,
+    'Tau': 932,
+    'Upsilon': 933,
+    'Phi': 934,
+    'Chi': 935,
+    'Psi': 936,
+    'Omega': 937,
+    'alpha': 945,
+    'beta': 946,
+    'gamma': 947,
+    'delta': 948,
+    'epsilon': 949,
+    'zeta': 950,
+    'eta': 951,
+    'theta': 952,
+    'iota': 953,
+    'kappa': 954,
+    'lambda': 955,
+    'mu': 956,
+    'nu': 957,
+    'xi': 958,
+    'omicron': 959,
+    'pi': 960,
+    'rho': 961,
+    'sigmaf': 962,
+    'sigma': 963,
+    'tau': 964,
+    'upsilon': 965,
+    'phi': 966,
+    'chi': 967,
+    'psi': 968,
+    'omega': 969,
+    'thetasym': 977,
+    'upsih': 978,
+    'piv': 982,
+    'ensp': 8194,
+    'emsp': 8195,
+    'thinsp': 8201,
+    'zwnj': 8204,
+    'zwj': 8205,
+    'lrm': 8206,
+    'rlm': 8207,
+    'ndash': 8211,
+    'mdash': 8212,
+    'lsquo': 8216,
+    'rsquo': 8217,
+    'sbquo': 8218,
+    'ldquo': 8220,
+    'rdquo': 8221,
+    'bdquo': 8222,
+    'dagger': 8224,
+    'Dagger': 8225,
+    'bull': 8226,
+    'hellip': 8230,
+    'permil': 8240,
+    'prime': 8242,
+    'Prime': 8243,
+    'lsaquo': 8249,
+    'rsaquo': 8250,
+    'oline': 8254,
+    'frasl': 8260,
+    'euro': 8364,
+    'image': 8465,
+    'weierp': 8472,
+    'real': 8476,
+    'trade': 8482,
+    'alefsym': 8501,
+    'larr': 8592,
+    'uarr': 8593,
+    'rarr': 8594,
+    'darr': 8595,
+    'harr': 8596,
+    'crarr': 8629,
+    'lArr': 8656,
+    'uArr': 8657,
+    'rArr': 8658,
+    'dArr': 8659,
+    'hArr': 8660,
+    'forall': 8704,
+    'part': 8706,
+    'exist': 8707,
+    'empty': 8709,
+    'nabla': 8711,
+    'isin': 8712,
+    'notin': 8713,
+    'ni': 8715,
+    'prod': 8719,
+    'sum': 8721,
+    'minus': 8722,
+    'lowast': 8727,
+    'radic': 8730,
+    'prop': 8733,
+    'infin': 8734,
+    'ang': 8736,
+    'and': 8743,
+    'or': 8744,
+    'cap': 8745,
+    'cup': 8746,
+    'int': 8747,
+    'there4': 8756,
+    'sim': 8764,
+    'cong': 8773,
+    'asymp': 8776,
+    'ne': 8800,
+    'equiv': 8801,
+    'le': 8804,
+    'ge': 8805,
+    'sub': 8834,
+    'sup': 8835,
+    'nsub': 8836,
+    'sube': 8838,
+    'supe': 8839,
+    'oplus': 8853,
+    'otimes': 8855,
+    'perp': 8869,
+    'sdot': 8901,
+    'lceil': 8968,
+    'rceil': 8969,
+    'lfloor': 8970,
+    'rfloor': 8971,
+    'lang': 9001,
+    'rang': 9002,
+    'loz': 9674,
+    'spades': 9824,
+    'clubs': 9827,
+    'hearts': 9829,
+    'diams': 9830
+  }
+
+  Object.keys(sax.ENTITIES).forEach(function (key) {
+    var e = sax.ENTITIES[key]
+    var s = typeof e === 'number' ? String.fromCharCode(e) : e
+    sax.ENTITIES[key] = s
+  })
+
+  for (var s in sax.STATE) {
+    sax.STATE[sax.STATE[s]] = s
+  }
+
+  // shorthand
+  S = sax.STATE
+
+  function emit (parser, event, data) {
+    parser[event] && parser[event](data)
+  }
+
+  function emitNode (parser, nodeType, data) {
+    if (parser.textNode) closeText(parser)
+    emit(parser, nodeType, data)
+  }
+
+  function closeText (parser) {
+    parser.textNode = textopts(parser.opt, parser.textNode)
+    if (parser.textNode) emit(parser, 'ontext', parser.textNode)
+    parser.textNode = ''
+  }
+
+  function textopts (opt, text) {
+    if (opt.trim) text = text.trim()
+    if (opt.normalize) text = text.replace(/\s+/g, ' ')
+    return text
+  }
+
+  function error (parser, er) {
+    closeText(parser)
+    if (parser.trackPosition) {
+      er += '\nLine: ' + parser.line +
+        '\nColumn: ' + parser.column +
+        '\nChar: ' + parser.c
+    }
+    er = new Error(er)
+    parser.error = er
+    emit(parser, 'onerror', er)
+    return parser
+  }
+
+  function end (parser) {
+    if (parser.sawRoot && !parser.closedRoot) strictFail(parser, 'Unclosed root tag')
+    if ((parser.state !== S.BEGIN) &&
+      (parser.state !== S.BEGIN_WHITESPACE) &&
+      (parser.state !== S.TEXT)) {
+      error(parser, 'Unexpected end')
+    }
+    closeText(parser)
+    parser.c = ''
+    parser.closed = true
+    emit(parser, 'onend')
+    SAXParser.call(parser, parser.strict, parser.opt)
+    return parser
+  }
+
+  function strictFail (parser, message) {
+    if (typeof parser !== 'object' || !(parser instanceof SAXParser)) {
+      throw new Error('bad call to strictFail')
+    }
+    if (parser.strict) {
+      error(parser, message)
+    }
+  }
+
+  function newTag (parser) {
+    if (!parser.strict) parser.tagName = parser.tagName[parser.looseCase]()
+    var parent = parser.tags[parser.tags.length - 1] || parser
+    var tag = parser.tag = { name: parser.tagName, attributes: {} }
+
+    // will be overridden if tag contails an xmlns="foo" or xmlns:foo="bar"
+    if (parser.opt.xmlns) {
+      tag.ns = parent.ns
+    }
+    parser.attribList.length = 0
+    emitNode(parser, 'onopentagstart', tag)
+  }
+
+  function qname (name, attribute) {
+    var i = name.indexOf(':')
+    var qualName = i < 0 ? [ '', name ] : name.split(':')
+    var prefix = qualName[0]
+    var local = qualName[1]
+
+    // <x "xmlns"="http://foo">
+    if (attribute && name === 'xmlns') {
+      prefix = 'xmlns'
+      local = ''
+    }
+
+    return { prefix: prefix, local: local }
+  }
+
+  function attrib (parser) {
+    if (!parser.strict) {
+      parser.attribName = parser.attribName[parser.looseCase]()
+    }
+
+    if (parser.attribList.indexOf(parser.attribName) !== -1 ||
+      parser.tag.attributes.hasOwnProperty(parser.attribName)) {
+      parser.attribName = parser.attribValue = ''
+      return
+    }
+
+    if (parser.opt.xmlns) {
+      var qn = qname(parser.attribName, true)
+      var prefix = qn.prefix
+      var local = qn.local
+
+      if (prefix === 'xmlns') {
+        // namespace binding attribute. push the binding into scope
+        if (local === 'xml' && parser.attribValue !== XML_NAMESPACE) {
+          strictFail(parser,
+            'xml: prefix must be bound to ' + XML_NAMESPACE + '\n' +
+            'Actual: ' + parser.attribValue)
+        } else if (local === 'xmlns' && parser.attribValue !== XMLNS_NAMESPACE) {
+          strictFail(parser,
+            'xmlns: prefix must be bound to ' + XMLNS_NAMESPACE + '\n' +
+            'Actual: ' + parser.attribValue)
+        } else {
+          var tag = parser.tag
+          var parent = parser.tags[parser.tags.length - 1] || parser
+          if (tag.ns === parent.ns) {
+            tag.ns = Object.create(parent.ns)
+          }
+          tag.ns[local] = parser.attribValue
+        }
+      }
+
+      // defer onattribute events until all attributes have been seen
+      // so any new bindings can take effect. preserve attribute order
+      // so deferred events can be emitted in document order
+      parser.attribList.push([parser.attribName, parser.attribValue])
+    } else {
+      // in non-xmlns mode, we can emit the event right away
+      parser.tag.attributes[parser.attribName] = parser.attribValue
+      emitNode(parser, 'onattribute', {
+        name: parser.attribName,
+        value: parser.attribValue
+      })
+    }
+
+    parser.attribName = parser.attribValue = ''
+  }
+
+  function openTag (parser, selfClosing) {
+    if (parser.opt.xmlns) {
+      // emit namespace binding events
+      var tag = parser.tag
+
+      // add namespace info to tag
+      var qn = qname(parser.tagName)
+      tag.prefix = qn.prefix
+      tag.local = qn.local
+      tag.uri = tag.ns[qn.prefix] || ''
+
+      if (tag.prefix && !tag.uri) {
+        strictFail(parser, 'Unbound namespace prefix: ' +
+          JSON.stringify(parser.tagName))
+        tag.uri = qn.prefix
+      }
+
+      var parent = parser.tags[parser.tags.length - 1] || parser
+      if (tag.ns && parent.ns !== tag.ns) {
+        Object.keys(tag.ns).forEach(function (p) {
+          emitNode(parser, 'onopennamespace', {
+            prefix: p,
+            uri: tag.ns[p]
+          })
+        })
+      }
+
+      // handle deferred onattribute events
+      // Note: do not apply default ns to attributes:
+      //   http://www.w3.org/TR/REC-xml-names/#defaulting
+      for (var i = 0, l = parser.attribList.length; i < l; i++) {
+        var nv = parser.attribList[i]
+        var name = nv[0]
+        var value = nv[1]
+        var qualName = qname(name, true)
+        var prefix = qualName.prefix
+        var local = qualName.local
+        var uri = prefix === '' ? '' : (tag.ns[prefix] || '')
+        var a = {
+          name: name,
+          value: value,
+          prefix: prefix,
+          local: local,
+          uri: uri
+        }
+
+        // if there's any attributes with an undefined namespace,
+        // then fail on them now.
+        if (prefix && prefix !== 'xmlns' && !uri) {
+          strictFail(parser, 'Unbound namespace prefix: ' +
+            JSON.stringify(prefix))
+          a.uri = prefix
+        }
+        parser.tag.attributes[name] = a
+        emitNode(parser, 'onattribute', a)
+      }
+      parser.attribList.length = 0
+    }
+
+    parser.tag.isSelfClosing = !!selfClosing
+
+    // process the tag
+    parser.sawRoot = true
+    parser.tags.push(parser.tag)
+    emitNode(parser, 'onopentag', parser.tag)
+    if (!selfClosing) {
+      // special case for <script> in non-strict mode.
+      if (!parser.noscript && parser.tagName.toLowerCase() === 'script') {
+        parser.state = S.SCRIPT
+      } else {
+        parser.state = S.TEXT
+      }
+      parser.tag = null
+      parser.tagName = ''
+    }
+    parser.attribName = parser.attribValue = ''
+    parser.attribList.length = 0
+  }
+
+  function closeTag (parser) {
+    if (!parser.tagName) {
+      strictFail(parser, 'Weird empty close tag.')
+      parser.textNode += '</>'
+      parser.state = S.TEXT
+      return
+    }
+
+    if (parser.script) {
+      if (parser.tagName !== 'script') {
+        parser.script += '</' + parser.tagName + '>'
+        parser.tagName = ''
+        parser.state = S.SCRIPT
+        return
+      }
+      emitNode(parser, 'onscript', parser.script)
+      parser.script = ''
+    }
+
+    // first make sure that the closing tag actually exists.
+    // <a><b></c></b></a> will close everything, otherwise.
+    var t = parser.tags.length
+    var tagName = parser.tagName
+    if (!parser.strict) {
+      tagName = tagName[parser.looseCase]()
+    }
+    var closeTo = tagName
+    while (t--) {
+      var close = parser.tags[t]
+      if (close.name !== closeTo) {
+        // fail the first time in strict mode
+        strictFail(parser, 'Unexpected close tag')
+      } else {
+        break
+      }
+    }
+
+    // didn't find it.  we already failed for strict, so just abort.
+    if (t < 0) {
+      strictFail(parser, 'Unmatched closing tag: ' + parser.tagName)
+      parser.textNode += '</' + parser.tagName + '>'
+      parser.state = S.TEXT
+      return
+    }
+    parser.tagName = tagName
+    var s = parser.tags.length
+    while (s-- > t) {
+      var tag = parser.tag = parser.tags.pop()
+      parser.tagName = parser.tag.name
+      emitNode(parser, 'onclosetag', parser.tagName)
+
+      var x = {}
+      for (var i in tag.ns) {
+        x[i] = tag.ns[i]
+      }
+
+      var parent = parser.tags[parser.tags.length - 1] || parser
+      if (parser.opt.xmlns && tag.ns !== parent.ns) {
+        // remove namespace bindings introduced by tag
+        Object.keys(tag.ns).forEach(function (p) {
+          var n = tag.ns[p]
+          emitNode(parser, 'onclosenamespace', { prefix: p, uri: n })
+        })
+      }
+    }
+    if (t === 0) parser.closedRoot = true
+    parser.tagName = parser.attribValue = parser.attribName = ''
+    parser.attribList.length = 0
+    parser.state = S.TEXT
+  }
+
+  function parseEntity (parser) {
+    var entity = parser.entity
+    var entityLC = entity.toLowerCase()
+    var num
+    var numStr = ''
+
+    if (parser.ENTITIES[entity]) {
+      return parser.ENTITIES[entity]
+    }
+    if (parser.ENTITIES[entityLC]) {
+      return parser.ENTITIES[entityLC]
+    }
+    entity = entityLC
+    if (entity.charAt(0) === '#') {
+      if (entity.charAt(1) === 'x') {
+        entity = entity.slice(2)
+        num = parseInt(entity, 16)
+        numStr = num.toString(16)
+      } else {
+        entity = entity.slice(1)
+        num = parseInt(entity, 10)
+        numStr = num.toString(10)
+      }
+    }
+    entity = entity.replace(/^0+/, '')
+    if (isNaN(num) || numStr.toLowerCase() !== entity) {
+      strictFail(parser, 'Invalid character entity')
+      return '&' + parser.entity + ';'
+    }
+
+    return String.fromCodePoint(num)
+  }
+
+  function beginWhiteSpace (parser, c) {
+    if (c === '<') {
+      parser.state = S.OPEN_WAKA
+      parser.startTagPosition = parser.position
+    } else if (!isWhitespace(c)) {
+      // have to process this as a text node.
+      // weird, but happens.
+      strictFail(parser, 'Non-whitespace before first tag.')
+      parser.textNode = c
+      parser.state = S.TEXT
+    }
+  }
+
+  function charAt (chunk, i) {
+    var result = ''
+    if (i < chunk.length) {
+      result = chunk.charAt(i)
+    }
+    return result
+  }
+
+  function write (chunk) {
+    var parser = this
+    if (this.error) {
+      throw this.error
+    }
+    if (parser.closed) {
+      return error(parser,
+        'Cannot write after close. Assign an onready handler.')
+    }
+    if (chunk === null) {
+      return end(parser)
+    }
+    if (typeof chunk === 'object') {
+      chunk = chunk.toString()
+    }
+    var i = 0
+    var c = ''
+    while (true) {
+      c = charAt(chunk, i++)
+      parser.c = c
+
+      if (!c) {
+        break
+      }
+
+      if (parser.trackPosition) {
+        parser.position++
+        if (c === '\n') {
+          parser.line++
+          parser.column = 0
+        } else {
+          parser.column++
+        }
+      }
+
+      switch (parser.state) {
+        case S.BEGIN:
+          parser.state = S.BEGIN_WHITESPACE
+          if (c === '\uFEFF') {
+            continue
+          }
+          beginWhiteSpace(parser, c)
+          continue
+
+        case S.BEGIN_WHITESPACE:
+          beginWhiteSpace(parser, c)
+          continue
+
+        case S.TEXT:
+          if (parser.sawRoot && !parser.closedRoot) {
+            var starti = i - 1
+            while (c && c !== '<' && c !== '&') {
+              c = charAt(chunk, i++)
+              if (c && parser.trackPosition) {
+                parser.position++
+                if (c === '\n') {
+                  parser.line++
+                  parser.column = 0
+                } else {
+                  parser.column++
+                }
+              }
+            }
+            parser.textNode += chunk.substring(starti, i - 1)
+          }
+          if (c === '<' && !(parser.sawRoot && parser.closedRoot && !parser.strict)) {
+            parser.state = S.OPEN_WAKA
+            parser.startTagPosition = parser.position
+          } else {
+            if (!isWhitespace(c) && (!parser.sawRoot || parser.closedRoot)) {
+              strictFail(parser, 'Text data outside of root node.')
+            }
+            if (c === '&') {
+              parser.state = S.TEXT_ENTITY
+            } else {
+              parser.textNode += c
+            }
+          }
+          continue
+
+        case S.SCRIPT:
+          // only non-strict
+          if (c === '<') {
+            parser.state = S.SCRIPT_ENDING
+          } else {
+            parser.script += c
+          }
+          continue
+
+        case S.SCRIPT_ENDING:
+          if (c === '/') {
+            parser.state = S.CLOSE_TAG
+          } else {
+            parser.script += '<' + c
+            parser.state = S.SCRIPT
+          }
+          continue
+
+        case S.OPEN_WAKA:
+          // either a /, ?, !, or text is coming next.
+          if (c === '!') {
+            parser.state = S.SGML_DECL
+            parser.sgmlDecl = ''
+          } else if (isWhitespace(c)) {
+            // wait for it...
+          } else if (isMatch(nameStart, c)) {
+            parser.state = S.OPEN_TAG
+            parser.tagName = c
+          } else if (c === '/') {
+            parser.state = S.CLOSE_TAG
+            parser.tagName = ''
+          } else if (c === '?') {
+            parser.state = S.PROC_INST
+            parser.procInstName = parser.procInstBody = ''
+          } else {
+            strictFail(parser, 'Unencoded <')
+            // if there was some whitespace, then add that in.
+            if (parser.startTagPosition + 1 < parser.position) {
+              var pad = parser.position - parser.startTagPosition
+              c = new Array(pad).join(' ') + c
+            }
+            parser.textNode += '<' + c
+            parser.state = S.TEXT
+          }
+          continue
+
+        case S.SGML_DECL:
+          if ((parser.sgmlDecl + c).toUpperCase() === CDATA) {
+            emitNode(parser, 'onopencdata')
+            parser.state = S.CDATA
+            parser.sgmlDecl = ''
+            parser.cdata = ''
+          } else if (parser.sgmlDecl + c === '--') {
+            parser.state = S.COMMENT
+            parser.comment = ''
+            parser.sgmlDecl = ''
+          } else if ((parser.sgmlDecl + c).toUpperCase() === DOCTYPE) {
+            parser.state = S.DOCTYPE
+            if (parser.doctype || parser.sawRoot) {
+              strictFail(parser,
+                'Inappropriately located doctype declaration')
+            }
+            parser.doctype = ''
+            parser.sgmlDecl = ''
+          } else if (c === '>') {
+            emitNode(parser, 'onsgmldeclaration', parser.sgmlDecl)
+            parser.sgmlDecl = ''
+            parser.state = S.TEXT
+          } else if (isQuote(c)) {
+            parser.state = S.SGML_DECL_QUOTED
+            parser.sgmlDecl += c
+          } else {
+            parser.sgmlDecl += c
+          }
+          continue
+
+        case S.SGML_DECL_QUOTED:
+          if (c === parser.q) {
+            parser.state = S.SGML_DECL
+            parser.q = ''
+          }
+          parser.sgmlDecl += c
+          continue
+
+        case S.DOCTYPE:
+          if (c === '>') {
+            parser.state = S.TEXT
+            emitNode(parser, 'ondoctype', parser.doctype)
+            parser.doctype = true // just remember that we saw it.
+          } else {
+            parser.doctype += c
+            if (c === '[') {
+              parser.state = S.DOCTYPE_DTD
+            } else if (isQuote(c)) {
+              parser.state = S.DOCTYPE_QUOTED
+              parser.q = c
+            }
+          }
+          continue
+
+        case S.DOCTYPE_QUOTED:
+          parser.doctype += c
+          if (c === parser.q) {
+            parser.q = ''
+            parser.state = S.DOCTYPE
+          }
+          continue
+
+        case S.DOCTYPE_DTD:
+          parser.doctype += c
+          if (c === ']') {
+            parser.state = S.DOCTYPE
+          } else if (isQuote(c)) {
+            parser.state = S.DOCTYPE_DTD_QUOTED
+            parser.q = c
+          }
+          continue
+
+        case S.DOCTYPE_DTD_QUOTED:
+          parser.doctype += c
+          if (c === parser.q) {
+            parser.state = S.DOCTYPE_DTD
+            parser.q = ''
+          }
+          continue
+
+        case S.COMMENT:
+          if (c === '-') {
+            parser.state = S.COMMENT_ENDING
+          } else {
+            parser.comment += c
+          }
+          continue
+
+        case S.COMMENT_ENDING:
+          if (c === '-') {
+            parser.state = S.COMMENT_ENDED
+            parser.comment = textopts(parser.opt, parser.comment)
+            if (parser.comment) {
+              emitNode(parser, 'oncomment', parser.comment)
+            }
+            parser.comment = ''
+          } else {
+            parser.comment += '-' + c
+            parser.state = S.COMMENT
+          }
+          continue
+
+        case S.COMMENT_ENDED:
+          if (c !== '>') {
+            strictFail(parser, 'Malformed comment')
+            // allow <!-- blah -- bloo --> in non-strict mode,
+            // which is a comment of " blah -- bloo "
+            parser.comment += '--' + c
+            parser.state = S.COMMENT
+          } else {
+            parser.state = S.TEXT
+          }
+          continue
+
+        case S.CDATA:
+          if (c === ']') {
+            parser.state = S.CDATA_ENDING
+          } else {
+            parser.cdata += c
+          }
+          continue
+
+        case S.CDATA_ENDING:
+          if (c === ']') {
+            parser.state = S.CDATA_ENDING_2
+          } else {
+            parser.cdata += ']' + c
+            parser.state = S.CDATA
+          }
+          continue
+
+        case S.CDATA_ENDING_2:
+          if (c === '>') {
+            if (parser.cdata) {
+              emitNode(parser, 'oncdata', parser.cdata)
+            }
+            emitNode(parser, 'onclosecdata')
+            parser.cdata = ''
+            parser.state = S.TEXT
+          } else if (c === ']') {
+            parser.cdata += ']'
+          } else {
+            parser.cdata += ']]' + c
+            parser.state = S.CDATA
+          }
+          continue
+
+        case S.PROC_INST:
+          if (c === '?') {
+            parser.state = S.PROC_INST_ENDING
+          } else if (isWhitespace(c)) {
+            parser.state = S.PROC_INST_BODY
+          } else {
+            parser.procInstName += c
+          }
+          continue
+
+        case S.PROC_INST_BODY:
+          if (!parser.procInstBody && isWhitespace(c)) {
+            continue
+          } else if (c === '?') {
+            parser.state = S.PROC_INST_ENDING
+          } else {
+            parser.procInstBody += c
+          }
+          continue
+
+        case S.PROC_INST_ENDING:
+          if (c === '>') {
+            emitNode(parser, 'onprocessinginstruction', {
+              name: parser.procInstName,
+              body: parser.procInstBody
+            })
+            parser.procInstName = parser.procInstBody = ''
+            parser.state = S.TEXT
+          } else {
+            parser.procInstBody += '?' + c
+            parser.state = S.PROC_INST_BODY
+          }
+          continue
+
+        case S.OPEN_TAG:
+          if (isMatch(nameBody, c)) {
+            parser.tagName += c
+          } else {
+            newTag(parser)
+            if (c === '>') {
+              openTag(parser)
+            } else if (c === '/') {
+              parser.state = S.OPEN_TAG_SLASH
+            } else {
+              if (!isWhitespace(c)) {
+                strictFail(parser, 'Invalid character in tag name')
+              }
+              parser.state = S.ATTRIB
+            }
+          }
+          continue
+
+        case S.OPEN_TAG_SLASH:
+          if (c === '>') {
+            openTag(parser, true)
+            closeTag(parser)
+          } else {
+            strictFail(parser, 'Forward-slash in opening tag not followed by >')
+            parser.state = S.ATTRIB
+          }
+          continue
+
+        case S.ATTRIB:
+          // haven't read the attribute name yet.
+          if (isWhitespace(c)) {
+            continue
+          } else if (c === '>') {
+            openTag(parser)
+          } else if (c === '/') {
+            parser.state = S.OPEN_TAG_SLASH
+          } else if (isMatch(nameStart, c)) {
+            parser.attribName = c
+            parser.attribValue = ''
+            parser.state = S.ATTRIB_NAME
+          } else {
+            strictFail(parser, 'Invalid attribute name')
+          }
+          continue
+
+        case S.ATTRIB_NAME:
+          if (c === '=') {
+            parser.state = S.ATTRIB_VALUE
+          } else if (c === '>') {
+            strictFail(parser, 'Attribute without value')
+            parser.attribValue = parser.attribName
+            attrib(parser)
+            openTag(parser)
+          } else if (isWhitespace(c)) {
+            parser.state = S.ATTRIB_NAME_SAW_WHITE
+          } else if (isMatch(nameBody, c)) {
+            parser.attribName += c
+          } else {
+            strictFail(parser, 'Invalid attribute name')
+          }
+          continue
+
+        case S.ATTRIB_NAME_SAW_WHITE:
+          if (c === '=') {
+            parser.state = S.ATTRIB_VALUE
+          } else if (isWhitespace(c)) {
+            continue
+          } else {
+            strictFail(parser, 'Attribute without value')
+            parser.tag.attributes[parser.attribName] = ''
+            parser.attribValue = ''
+            emitNode(parser, 'onattribute', {
+              name: parser.attribName,
+              value: ''
+            })
+            parser.attribName = ''
+            if (c === '>') {
+              openTag(parser)
+            } else if (isMatch(nameStart, c)) {
+              parser.attribName = c
+              parser.state = S.ATTRIB_NAME
+            } else {
+              strictFail(parser, 'Invalid attribute name')
+              parser.state = S.ATTRIB
+            }
+          }
+          continue
+
+        case S.ATTRIB_VALUE:
+          if (isWhitespace(c)) {
+            continue
+          } else if (isQuote(c)) {
+            parser.q = c
+            parser.state = S.ATTRIB_VALUE_QUOTED
+          } else {
+            strictFail(parser, 'Unquoted attribute value')
+            parser.state = S.ATTRIB_VALUE_UNQUOTED
+            parser.attribValue = c
+          }
+          continue
+
+        case S.ATTRIB_VALUE_QUOTED:
+          if (c !== parser.q) {
+            if (c === '&') {
+              parser.state = S.ATTRIB_VALUE_ENTITY_Q
+            } else {
+              parser.attribValue += c
+            }
+            continue
+          }
+          attrib(parser)
+          parser.q = ''
+          parser.state = S.ATTRIB_VALUE_CLOSED
+          continue
+
+        case S.ATTRIB_VALUE_CLOSED:
+          if (isWhitespace(c)) {
+            parser.state = S.ATTRIB
+          } else if (c === '>') {
+            openTag(parser)
+          } else if (c === '/') {
+            parser.state = S.OPEN_TAG_SLASH
+          } else if (isMatch(nameStart, c)) {
+            strictFail(parser, 'No whitespace between attributes')
+            parser.attribName = c
+            parser.attribValue = ''
+            parser.state = S.ATTRIB_NAME
+          } else {
+            strictFail(parser, 'Invalid attribute name')
+          }
+          continue
+
+        case S.ATTRIB_VALUE_UNQUOTED:
+          if (!isAttribEnd(c)) {
+            if (c === '&') {
+              parser.state = S.ATTRIB_VALUE_ENTITY_U
+            } else {
+              parser.attribValue += c
+            }
+            continue
+          }
+          attrib(parser)
+          if (c === '>') {
+            openTag(parser)
+          } else {
+            parser.state = S.ATTRIB
+          }
+          continue
+
+        case S.CLOSE_TAG:
+          if (!parser.tagName) {
+            if (isWhitespace(c)) {
+              continue
+            } else if (notMatch(nameStart, c)) {
+              if (parser.script) {
+                parser.script += '</' + c
+                parser.state = S.SCRIPT
+              } else {
+                strictFail(parser, 'Invalid tagname in closing tag.')
+              }
+            } else {
+              parser.tagName = c
+            }
+          } else if (c === '>') {
+            closeTag(parser)
+          } else if (isMatch(nameBody, c)) {
+            parser.tagName += c
+          } else if (parser.script) {
+            parser.script += '</' + parser.tagName
+            parser.tagName = ''
+            parser.state = S.SCRIPT
+          } else {
+            if (!isWhitespace(c)) {
+              strictFail(parser, 'Invalid tagname in closing tag')
+            }
+            parser.state = S.CLOSE_TAG_SAW_WHITE
+          }
+          continue
+
+        case S.CLOSE_TAG_SAW_WHITE:
+          if (isWhitespace(c)) {
+            continue
+          }
+          if (c === '>') {
+            closeTag(parser)
+          } else {
+            strictFail(parser, 'Invalid characters in closing tag')
+          }
+          continue
+
+        case S.TEXT_ENTITY:
+        case S.ATTRIB_VALUE_ENTITY_Q:
+        case S.ATTRIB_VALUE_ENTITY_U:
+          var returnState
+          var buffer
+          switch (parser.state) {
+            case S.TEXT_ENTITY:
+              returnState = S.TEXT
+              buffer = 'textNode'
+              break
+
+            case S.ATTRIB_VALUE_ENTITY_Q:
+              returnState = S.ATTRIB_VALUE_QUOTED
+              buffer = 'attribValue'
+              break
+
+            case S.ATTRIB_VALUE_ENTITY_U:
+              returnState = S.ATTRIB_VALUE_UNQUOTED
+              buffer = 'attribValue'
+              break
+          }
+
+          if (c === ';') {
+            parser[buffer] += parseEntity(parser)
+            parser.entity = ''
+            parser.state = returnState
+          } else if (isMatch(parser.entity.length ? entityBody : entityStart, c)) {
+            parser.entity += c
+          } else {
+            strictFail(parser, 'Invalid character in entity name')
+            parser[buffer] += '&' + parser.entity + c
+            parser.entity = ''
+            parser.state = returnState
+          }
+
+          continue
+
+        default:
+          throw new Error(parser, 'Unknown state: ' + parser.state)
+      }
+    } // while
+
+    if (parser.position >= parser.bufferCheckPosition) {
+      checkBufferLength(parser)
+    }
+    return parser
+  }
+
+  /*! http://mths.be/fromcodepoint v0.1.0 by @mathias */
+  /* istanbul ignore next */
+  if (!String.fromCodePoint) {
+    (function () {
+      var stringFromCharCode = String.fromCharCode
+      var floor = Math.floor
+      var fromCodePoint = function () {
+        var MAX_SIZE = 0x4000
+        var codeUnits = []
+        var highSurrogate
+        var lowSurrogate
+        var index = -1
+        var length = arguments.length
+        if (!length) {
+          return ''
+        }
+        var result = ''
+        while (++index < length) {
+          var codePoint = Number(arguments[index])
+          if (
+            !isFinite(codePoint) || // `NaN`, `+Infinity`, or `-Infinity`
+            codePoint < 0 || // not a valid Unicode code point
+            codePoint > 0x10FFFF || // not a valid Unicode code point
+            floor(codePoint) !== codePoint // not an integer
+          ) {
+            throw RangeError('Invalid code point: ' + codePoint)
+          }
+          if (codePoint <= 0xFFFF) { // BMP code point
+            codeUnits.push(codePoint)
+          } else { // Astral code point; split in surrogate halves
+            // http://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
+            codePoint -= 0x10000
+            highSurrogate = (codePoint >> 10) + 0xD800
+            lowSurrogate = (codePoint % 0x400) + 0xDC00
+            codeUnits.push(highSurrogate, lowSurrogate)
+          }
+          if (index + 1 === length || codeUnits.length > MAX_SIZE) {
+            result += stringFromCharCode.apply(null, codeUnits)
+            codeUnits.length = 0
+          }
+        }
+        return result
+      }
+      /* istanbul ignore next */
+      if (Object.defineProperty) {
+        Object.defineProperty(String, 'fromCodePoint', {
+          value: fromCodePoint,
+          configurable: true,
+          writable: true
+        })
+      } else {
+        String.fromCodePoint = fromCodePoint
+      }
+    }())
+  }
+})(typeof exports === 'undefined' ? this.sax = {} : exports)
+
+}).call(this)}).call(this,require("buffer").Buffer)
+},{"buffer":3,"stream":22,"string_decoder":57}],22:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -6198,7 +6202,7 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":12,"inherits":15,"readable-stream/lib/_stream_duplex.js":25,"readable-stream/lib/_stream_passthrough.js":26,"readable-stream/lib/_stream_readable.js":27,"readable-stream/lib/_stream_transform.js":28,"readable-stream/lib/_stream_writable.js":29,"readable-stream/lib/internal/streams/end-of-stream.js":33,"readable-stream/lib/internal/streams/pipeline.js":35}],24:[function(require,module,exports){
+},{"events":5,"inherits":8,"readable-stream/lib/_stream_duplex.js":24,"readable-stream/lib/_stream_passthrough.js":25,"readable-stream/lib/_stream_readable.js":26,"readable-stream/lib/_stream_transform.js":27,"readable-stream/lib/_stream_writable.js":28,"readable-stream/lib/internal/streams/end-of-stream.js":32,"readable-stream/lib/internal/streams/pipeline.js":34}],23:[function(require,module,exports){
 'use strict';
 
 function _inheritsLoose(subClass, superClass) { subClass.prototype = Object.create(superClass.prototype); subClass.prototype.constructor = subClass; subClass.__proto__ = superClass; }
@@ -6327,7 +6331,7 @@ createErrorType('ERR_UNKNOWN_ENCODING', function (arg) {
 createErrorType('ERR_STREAM_UNSHIFT_AFTER_END_EVENT', 'stream.unshift() after end event');
 module.exports.codes = codes;
 
-},{}],25:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 (function (process){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -6469,7 +6473,7 @@ Object.defineProperty(Duplex.prototype, 'destroyed', {
   }
 });
 }).call(this)}).call(this,require('_process'))
-},{"./_stream_readable":27,"./_stream_writable":29,"_process":16,"inherits":15}],26:[function(require,module,exports){
+},{"./_stream_readable":26,"./_stream_writable":28,"_process":15,"inherits":8}],25:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -6509,7 +6513,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":28,"inherits":15}],27:[function(require,module,exports){
+},{"./_stream_transform":27,"inherits":8}],26:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -7636,7 +7640,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":24,"./_stream_duplex":25,"./internal/streams/async_iterator":30,"./internal/streams/buffer_list":31,"./internal/streams/destroy":32,"./internal/streams/from":34,"./internal/streams/state":36,"./internal/streams/stream":37,"_process":16,"buffer":10,"events":12,"inherits":15,"string_decoder/":58,"util":9}],28:[function(require,module,exports){
+},{"../errors":23,"./_stream_duplex":24,"./internal/streams/async_iterator":29,"./internal/streams/buffer_list":30,"./internal/streams/destroy":31,"./internal/streams/from":33,"./internal/streams/state":35,"./internal/streams/stream":36,"_process":15,"buffer":3,"events":5,"inherits":8,"string_decoder/":57,"util":2}],27:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -7838,7 +7842,7 @@ function done(stream, er, data) {
   if (stream._transformState.transforming) throw new ERR_TRANSFORM_ALREADY_TRANSFORMING();
   return stream.push(null);
 }
-},{"../errors":24,"./_stream_duplex":25,"inherits":15}],29:[function(require,module,exports){
+},{"../errors":23,"./_stream_duplex":24,"inherits":8}],28:[function(require,module,exports){
 (function (process,global){(function (){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -8538,7 +8542,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../errors":24,"./_stream_duplex":25,"./internal/streams/destroy":32,"./internal/streams/state":36,"./internal/streams/stream":37,"_process":16,"buffer":10,"inherits":15,"util-deprecate":62}],30:[function(require,module,exports){
+},{"../errors":23,"./_stream_duplex":24,"./internal/streams/destroy":31,"./internal/streams/state":35,"./internal/streams/stream":36,"_process":15,"buffer":3,"inherits":8,"util-deprecate":61}],29:[function(require,module,exports){
 (function (process){(function (){
 'use strict';
 
@@ -8748,7 +8752,7 @@ var createReadableStreamAsyncIterator = function createReadableStreamAsyncIterat
 
 module.exports = createReadableStreamAsyncIterator;
 }).call(this)}).call(this,require('_process'))
-},{"./end-of-stream":33,"_process":16}],31:[function(require,module,exports){
+},{"./end-of-stream":32,"_process":15}],30:[function(require,module,exports){
 'use strict';
 
 function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); if (enumerableOnly) symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; }); keys.push.apply(keys, symbols); } return keys; }
@@ -8959,7 +8963,7 @@ function () {
 
   return BufferList;
 }();
-},{"buffer":10,"util":9}],32:[function(require,module,exports){
+},{"buffer":3,"util":2}],31:[function(require,module,exports){
 (function (process){(function (){
 'use strict'; // undocumented cb() API, needed for core, not for public API
 
@@ -9067,7 +9071,7 @@ module.exports = {
   errorOrDestroy: errorOrDestroy
 };
 }).call(this)}).call(this,require('_process'))
-},{"_process":16}],33:[function(require,module,exports){
+},{"_process":15}],32:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/end-of-stream with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -9172,12 +9176,12 @@ function eos(stream, opts, callback) {
 }
 
 module.exports = eos;
-},{"../../../errors":24}],34:[function(require,module,exports){
+},{"../../../errors":23}],33:[function(require,module,exports){
 module.exports = function () {
   throw new Error('Readable.from is not available in the browser')
 };
 
-},{}],35:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 // Ported from https://github.com/mafintosh/pump with
 // permission from the author, Mathias Buus (@mafintosh).
 'use strict';
@@ -9275,7 +9279,7 @@ function pipeline() {
 }
 
 module.exports = pipeline;
-},{"../../../errors":24,"./end-of-stream":33}],36:[function(require,module,exports){
+},{"../../../errors":23,"./end-of-stream":32}],35:[function(require,module,exports){
 'use strict';
 
 var ERR_INVALID_OPT_VALUE = require('../../../errors').codes.ERR_INVALID_OPT_VALUE;
@@ -9303,10 +9307,10 @@ function getHighWaterMark(state, options, duplexKey, isDuplex) {
 module.exports = {
   getHighWaterMark: getHighWaterMark
 };
-},{"../../../errors":24}],37:[function(require,module,exports){
+},{"../../../errors":23}],36:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":12}],38:[function(require,module,exports){
+},{"events":5}],37:[function(require,module,exports){
 (function (global){(function (){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -9394,7 +9398,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":40,"./lib/response":41,"builtin-status-codes":11,"url":60,"xtend":63}],39:[function(require,module,exports){
+},{"./lib/request":39,"./lib/response":40,"builtin-status-codes":4,"url":59,"xtend":62}],38:[function(require,module,exports){
 (function (global){(function (){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -9457,7 +9461,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],40:[function(require,module,exports){
+},{}],39:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -9813,7 +9817,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":39,"./response":41,"_process":16,"buffer":10,"inherits":15,"readable-stream":56}],41:[function(require,module,exports){
+},{"./capability":38,"./response":40,"_process":15,"buffer":3,"inherits":8,"readable-stream":55}],40:[function(require,module,exports){
 (function (process,global,Buffer){(function (){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -10028,35 +10032,35 @@ IncomingMessage.prototype._onXHRProgress = function (resetTimers) {
 }
 
 }).call(this)}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":39,"_process":16,"buffer":10,"inherits":15,"readable-stream":56}],42:[function(require,module,exports){
+},{"./capability":38,"_process":15,"buffer":3,"inherits":8,"readable-stream":55}],41:[function(require,module,exports){
+arguments[4][23][0].apply(exports,arguments)
+},{"dup":23}],42:[function(require,module,exports){
 arguments[4][24][0].apply(exports,arguments)
-},{"dup":24}],43:[function(require,module,exports){
+},{"./_stream_readable":44,"./_stream_writable":46,"_process":15,"dup":24,"inherits":8}],43:[function(require,module,exports){
 arguments[4][25][0].apply(exports,arguments)
-},{"./_stream_readable":45,"./_stream_writable":47,"_process":16,"dup":25,"inherits":15}],44:[function(require,module,exports){
+},{"./_stream_transform":45,"dup":25,"inherits":8}],44:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"./_stream_transform":46,"dup":26,"inherits":15}],45:[function(require,module,exports){
+},{"../errors":41,"./_stream_duplex":42,"./internal/streams/async_iterator":47,"./internal/streams/buffer_list":48,"./internal/streams/destroy":49,"./internal/streams/from":51,"./internal/streams/state":53,"./internal/streams/stream":54,"_process":15,"buffer":3,"dup":26,"events":5,"inherits":8,"string_decoder/":57,"util":2}],45:[function(require,module,exports){
 arguments[4][27][0].apply(exports,arguments)
-},{"../errors":42,"./_stream_duplex":43,"./internal/streams/async_iterator":48,"./internal/streams/buffer_list":49,"./internal/streams/destroy":50,"./internal/streams/from":52,"./internal/streams/state":54,"./internal/streams/stream":55,"_process":16,"buffer":10,"dup":27,"events":12,"inherits":15,"string_decoder/":58,"util":9}],46:[function(require,module,exports){
+},{"../errors":41,"./_stream_duplex":42,"dup":27,"inherits":8}],46:[function(require,module,exports){
 arguments[4][28][0].apply(exports,arguments)
-},{"../errors":42,"./_stream_duplex":43,"dup":28,"inherits":15}],47:[function(require,module,exports){
+},{"../errors":41,"./_stream_duplex":42,"./internal/streams/destroy":49,"./internal/streams/state":53,"./internal/streams/stream":54,"_process":15,"buffer":3,"dup":28,"inherits":8,"util-deprecate":61}],47:[function(require,module,exports){
 arguments[4][29][0].apply(exports,arguments)
-},{"../errors":42,"./_stream_duplex":43,"./internal/streams/destroy":50,"./internal/streams/state":54,"./internal/streams/stream":55,"_process":16,"buffer":10,"dup":29,"inherits":15,"util-deprecate":62}],48:[function(require,module,exports){
+},{"./end-of-stream":50,"_process":15,"dup":29}],48:[function(require,module,exports){
 arguments[4][30][0].apply(exports,arguments)
-},{"./end-of-stream":51,"_process":16,"dup":30}],49:[function(require,module,exports){
+},{"buffer":3,"dup":30,"util":2}],49:[function(require,module,exports){
 arguments[4][31][0].apply(exports,arguments)
-},{"buffer":10,"dup":31,"util":9}],50:[function(require,module,exports){
+},{"_process":15,"dup":31}],50:[function(require,module,exports){
 arguments[4][32][0].apply(exports,arguments)
-},{"_process":16,"dup":32}],51:[function(require,module,exports){
+},{"../../../errors":41,"dup":32}],51:[function(require,module,exports){
 arguments[4][33][0].apply(exports,arguments)
-},{"../../../errors":42,"dup":33}],52:[function(require,module,exports){
+},{"dup":33}],52:[function(require,module,exports){
 arguments[4][34][0].apply(exports,arguments)
-},{"dup":34}],53:[function(require,module,exports){
+},{"../../../errors":41,"./end-of-stream":50,"dup":34}],53:[function(require,module,exports){
 arguments[4][35][0].apply(exports,arguments)
-},{"../../../errors":42,"./end-of-stream":51,"dup":35}],54:[function(require,module,exports){
+},{"../../../errors":41,"dup":35}],54:[function(require,module,exports){
 arguments[4][36][0].apply(exports,arguments)
-},{"../../../errors":42,"dup":36}],55:[function(require,module,exports){
-arguments[4][37][0].apply(exports,arguments)
-},{"dup":37,"events":12}],56:[function(require,module,exports){
+},{"dup":36,"events":5}],55:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -10067,7 +10071,7 @@ exports.PassThrough = require('./lib/_stream_passthrough.js');
 exports.finished = require('./lib/internal/streams/end-of-stream.js');
 exports.pipeline = require('./lib/internal/streams/pipeline.js');
 
-},{"./lib/_stream_duplex.js":43,"./lib/_stream_passthrough.js":44,"./lib/_stream_readable.js":45,"./lib/_stream_transform.js":46,"./lib/_stream_writable.js":47,"./lib/internal/streams/end-of-stream.js":51,"./lib/internal/streams/pipeline.js":53}],57:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":42,"./lib/_stream_passthrough.js":43,"./lib/_stream_readable.js":44,"./lib/_stream_transform.js":45,"./lib/_stream_writable.js":46,"./lib/internal/streams/end-of-stream.js":50,"./lib/internal/streams/pipeline.js":52}],56:[function(require,module,exports){
 /*! stream-to-blob. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 /* global Blob */
 
@@ -10091,7 +10095,7 @@ function streamToBlob (stream, mimeType) {
   })
 }
 
-},{}],58:[function(require,module,exports){
+},{}],57:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -10388,7 +10392,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":21}],59:[function(require,module,exports){
+},{"safe-buffer":20}],58:[function(require,module,exports){
 (function (setImmediate,clearImmediate){(function (){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -10467,7 +10471,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this)}).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":16,"timers":59}],60:[function(require,module,exports){
+},{"process/browser.js":15,"timers":58}],59:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -11201,7 +11205,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":61,"punycode":17,"querystring":20}],61:[function(require,module,exports){
+},{"./util":60,"punycode":16,"querystring":19}],60:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -11219,7 +11223,7 @@ module.exports = {
   }
 };
 
-},{}],62:[function(require,module,exports){
+},{}],61:[function(require,module,exports){
 (function (global){(function (){
 
 /**
@@ -11290,7 +11294,7 @@ function config (name) {
 }
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],63:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -11311,7 +11315,7 @@ function extend() {
     return target
 }
 
-},{}],64:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 const { setTimeout } = require('timers');
 
 // A cache that expires.
@@ -11367,7 +11371,7 @@ module.exports = class Cache extends Map {
   }
 };
 
-},{"timers":59}],65:[function(require,module,exports){
+},{"timers":58}],64:[function(require,module,exports){
 const utils = require('./utils');
 const FORMATS = require('./formats');
 
@@ -11619,7 +11623,7 @@ exports.addFormatMeta = format => {
   return format;
 };
 
-},{"./formats":66,"./utils":72}],66:[function(require,module,exports){
+},{"./formats":65,"./utils":71}],65:[function(require,module,exports){
 /**
  * http://en.wikipedia.org/wiki/YouTube#Quality_and_formats
  */
@@ -12145,7 +12149,7 @@ module.exports = {
 
 };
 
-},{}],67:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 (function (setImmediate){(function (){
 const PassThrough = require('stream').PassThrough;
 const getInfo = require('./info');
@@ -12356,7 +12360,7 @@ ytdl.downloadFromInfo = (info, options) => {
 };
 
 }).call(this)}).call(this,require("timers").setImmediate)
-},{"../package.json":74,"./format-utils":65,"./info":69,"./sig":70,"./url-utils":71,"./utils":72,"m3u8stream":2,"miniget":73,"stream":23,"timers":59}],68:[function(require,module,exports){
+},{"../package.json":72,"./format-utils":64,"./info":68,"./sig":69,"./url-utils":70,"./utils":71,"m3u8stream":10,"miniget":14,"stream":22,"timers":58}],67:[function(require,module,exports){
 const utils = require('./utils');
 const qs = require('querystring');
 const { parseTimestamp } = require('m3u8stream');
@@ -12722,7 +12726,7 @@ exports.getChapters = info => {
   }));
 };
 
-},{"./utils":72,"m3u8stream":2,"querystring":20}],69:[function(require,module,exports){
+},{"./utils":71,"m3u8stream":10,"querystring":19}],68:[function(require,module,exports){
 const querystring = require('querystring');
 const sax = require('sax');
 const miniget = require('miniget');
@@ -13206,7 +13210,7 @@ exports.validateURL = urlUtils.validateURL;
 exports.getURLVideoID = urlUtils.getURLVideoID;
 exports.getVideoID = urlUtils.getVideoID;
 
-},{"./cache":64,"./format-utils":65,"./info-extras":68,"./sig":70,"./url-utils":71,"./utils":72,"miniget":73,"querystring":20,"sax":22,"timers":59}],70:[function(require,module,exports){
+},{"./cache":63,"./format-utils":64,"./info-extras":67,"./sig":69,"./url-utils":70,"./utils":71,"miniget":14,"querystring":19,"sax":21,"timers":58}],69:[function(require,module,exports){
 const querystring = require('querystring');
 const Cache = require('./cache');
 const utils = require('./utils');
@@ -13454,7 +13458,7 @@ exports.decipherFormats = async(formats, html5player, options) => {
   return decipheredFormats;
 };
 
-},{"./cache":64,"./utils":72,"querystring":20}],71:[function(require,module,exports){
+},{"./cache":63,"./utils":71,"querystring":19}],70:[function(require,module,exports){
 /**
  * Get video ID.
  *
@@ -13547,7 +13551,7 @@ exports.validateURL = string => {
   }
 };
 
-},{}],72:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 (function (process){(function (){
 const miniget = require('miniget');
 
@@ -13734,295 +13738,7 @@ exports.checkForUpdates = () => {
 };
 
 }).call(this)}).call(this,require('_process'))
-},{"../package.json":74,"_process":16,"miniget":73}],73:[function(require,module,exports){
-(function (process){(function (){
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-const http_1 = __importDefault(require("http"));
-const https_1 = __importDefault(require("https"));
-const stream_1 = require("stream");
-const httpLibs = { 'http:': http_1.default, 'https:': https_1.default };
-const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
-const retryStatusCodes = new Set([429, 503]);
-// `request`, `response`, `abort`, left out, miniget will emit these.
-const requestEvents = ['connect', 'continue', 'information', 'socket', 'timeout', 'upgrade'];
-const responseEvents = ['aborted'];
-Miniget.MinigetError = class MinigetError extends Error {
-    constructor(message, statusCode) {
-        super(message);
-        this.statusCode = statusCode;
-    }
-};
-Miniget.defaultOptions = {
-    maxRedirects: 10,
-    maxRetries: 2,
-    maxReconnects: 0,
-    backoff: { inc: 100, max: 10000 },
-};
-function Miniget(url, options = {}) {
-    var _a;
-    const opts = Object.assign({}, Miniget.defaultOptions, options);
-    const stream = new stream_1.PassThrough({ highWaterMark: opts.highWaterMark });
-    stream.destroyed = stream.aborted = false;
-    let activeRequest;
-    let activeResponse;
-    let activeDecodedStream;
-    let redirects = 0;
-    let retries = 0;
-    let retryTimeout;
-    let reconnects = 0;
-    let contentLength;
-    let acceptRanges = false;
-    let rangeStart = 0, rangeEnd;
-    let downloaded = 0;
-    // Check if this is a ranged request.
-    if ((_a = opts.headers) === null || _a === void 0 ? void 0 : _a.Range) {
-        let r = /bytes=(\d+)-(\d+)?/.exec(`${opts.headers.Range}`);
-        if (r) {
-            rangeStart = parseInt(r[1], 10);
-            rangeEnd = parseInt(r[2], 10);
-        }
-    }
-    // Add `Accept-Encoding` header.
-    if (opts.acceptEncoding) {
-        opts.headers = Object.assign({
-            'Accept-Encoding': Object.keys(opts.acceptEncoding).join(', '),
-        }, opts.headers);
-    }
-    const downloadHasStarted = () => activeDecodedStream && downloaded > 0;
-    const downloadComplete = () => !acceptRanges || downloaded === contentLength;
-    const reconnect = (err) => {
-        activeDecodedStream = null;
-        retries = 0;
-        let inc = opts.backoff.inc;
-        let ms = Math.min(inc, opts.backoff.max);
-        retryTimeout = setTimeout(doDownload, ms);
-        stream.emit('reconnect', reconnects, err);
-    };
-    const reconnectIfEndedEarly = (err) => {
-        if (options.method !== 'HEAD' && !downloadComplete() && reconnects++ < opts.maxReconnects) {
-            reconnect(err);
-            return true;
-        }
-        return false;
-    };
-    const retryRequest = (retryOptions) => {
-        if (stream.destroyed) {
-            return false;
-        }
-        if (downloadHasStarted()) {
-            return reconnectIfEndedEarly(retryOptions.err);
-        }
-        else if ((!retryOptions.err || retryOptions.err.message === 'ENOTFOUND') &&
-            retries++ < opts.maxRetries) {
-            let ms = retryOptions.retryAfter ||
-                Math.min(retries * opts.backoff.inc, opts.backoff.max);
-            retryTimeout = setTimeout(doDownload, ms);
-            stream.emit('retry', retries, retryOptions.err);
-            return true;
-        }
-        return false;
-    };
-    const forwardEvents = (ee, events) => {
-        for (let event of events) {
-            ee.on(event, stream.emit.bind(stream, event));
-        }
-    };
-    const doDownload = () => {
-        let parsed = {}, httpLib;
-        try {
-            let urlObj = typeof url === 'string' ? new URL(url) : url;
-            parsed = Object.assign({}, {
-                host: urlObj.host,
-                hostname: urlObj.hostname,
-                path: urlObj.pathname + urlObj.search + urlObj.hash,
-                port: urlObj.port,
-                protocol: urlObj.protocol,
-            });
-            if (urlObj.username) {
-                parsed.auth = `${urlObj.username}:${urlObj.password}`;
-            }
-            httpLib = httpLibs[String(parsed.protocol)];
-        }
-        catch (err) {
-            // Let the error be caught by the if statement below.
-        }
-        if (!httpLib) {
-            stream.emit('error', new Miniget.MinigetError(`Invalid URL: ${url}`));
-            return;
-        }
-        Object.assign(parsed, opts);
-        if (acceptRanges && downloaded > 0) {
-            let start = downloaded + rangeStart;
-            let end = rangeEnd || '';
-            parsed.headers = Object.assign({}, parsed.headers, {
-                Range: `bytes=${start}-${end}`,
-            });
-        }
-        if (opts.transform) {
-            try {
-                parsed = opts.transform(parsed);
-            }
-            catch (err) {
-                stream.emit('error', err);
-                return;
-            }
-            if (!parsed || parsed.protocol) {
-                httpLib = httpLibs[String(parsed === null || parsed === void 0 ? void 0 : parsed.protocol)];
-                if (!httpLib) {
-                    stream.emit('error', new Miniget.MinigetError('Invalid URL object from `transform` function'));
-                    return;
-                }
-            }
-        }
-        const onError = (err) => {
-            if (stream.destroyed || stream.readableEnded) {
-                return;
-            }
-            // Needed for node v10.
-            if (stream._readableState.ended) {
-                return;
-            }
-            cleanup();
-            if (!retryRequest({ err })) {
-                stream.emit('error', err);
-            }
-            else {
-                activeRequest.removeListener('close', onRequestClose);
-            }
-        };
-        const onRequestClose = () => {
-            cleanup();
-            retryRequest({});
-        };
-        const cleanup = () => {
-            activeRequest.removeListener('close', onRequestClose);
-            activeResponse === null || activeResponse === void 0 ? void 0 : activeResponse.removeListener('data', onData);
-            activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.removeListener('end', onEnd);
-        };
-        const onData = (chunk) => { downloaded += chunk.length; };
-        const onEnd = () => {
-            cleanup();
-            if (!reconnectIfEndedEarly()) {
-                stream.end();
-            }
-        };
-        activeRequest = httpLib.request(parsed, (res) => {
-            // Needed for node v10, v12.
-            // istanbul ignore next
-            if (stream.destroyed) {
-                return;
-            }
-            if (redirectStatusCodes.has(res.statusCode)) {
-                if (redirects++ >= opts.maxRedirects) {
-                    stream.emit('error', new Miniget.MinigetError('Too many redirects'));
-                }
-                else {
-                    if (res.headers.location) {
-                        url = res.headers.location;
-                    }
-                    else {
-                        let err = new Miniget.MinigetError('Redirect status code given with no location', res.statusCode);
-                        stream.emit('error', err);
-                        cleanup();
-                        return;
-                    }
-                    setTimeout(doDownload, parseInt(res.headers['retry-after'] || '0', 10) * 1000);
-                    stream.emit('redirect', url);
-                }
-                cleanup();
-                return;
-                // Check for rate limiting.
-            }
-            else if (retryStatusCodes.has(res.statusCode)) {
-                if (!retryRequest({ retryAfter: parseInt(res.headers['retry-after'] || '0', 10) })) {
-                    let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
-                    stream.emit('error', err);
-                }
-                cleanup();
-                return;
-            }
-            else if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
-                let err = new Miniget.MinigetError(`Status code: ${res.statusCode}`, res.statusCode);
-                if (res.statusCode >= 500) {
-                    onError(err);
-                }
-                else {
-                    stream.emit('error', err);
-                }
-                cleanup();
-                return;
-            }
-            activeDecodedStream = res;
-            if (opts.acceptEncoding && res.headers['content-encoding']) {
-                for (let enc of res.headers['content-encoding'].split(', ').reverse()) {
-                    let fn = opts.acceptEncoding[enc];
-                    if (fn) {
-                        activeDecodedStream = activeDecodedStream.pipe(fn());
-                        activeDecodedStream.on('error', onError);
-                    }
-                }
-            }
-            if (!contentLength) {
-                contentLength = parseInt(`${res.headers['content-length']}`, 10);
-                acceptRanges = res.headers['accept-ranges'] === 'bytes' &&
-                    contentLength > 0 && opts.maxReconnects > 0;
-            }
-            res.on('data', onData);
-            activeDecodedStream.on('end', onEnd);
-            activeDecodedStream.pipe(stream, { end: !acceptRanges });
-            activeResponse = res;
-            stream.emit('response', res);
-            res.on('error', onError);
-            forwardEvents(res, responseEvents);
-        });
-        activeRequest.on('error', onError);
-        activeRequest.on('close', onRequestClose);
-        forwardEvents(activeRequest, requestEvents);
-        if (stream.destroyed) {
-            streamDestroy(...destroyArgs);
-        }
-        stream.emit('request', activeRequest);
-        activeRequest.end();
-    };
-    stream.abort = (err) => {
-        console.warn('`MinigetStream#abort()` has been deprecated in favor of `MinigetStream#destroy()`');
-        stream.aborted = true;
-        stream.emit('abort');
-        stream.destroy(err);
-    };
-    let destroyArgs;
-    const streamDestroy = (err) => {
-        activeRequest.destroy(err);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.unpipe(stream);
-        activeDecodedStream === null || activeDecodedStream === void 0 ? void 0 : activeDecodedStream.destroy();
-        clearTimeout(retryTimeout);
-    };
-    stream._destroy = (...args) => {
-        stream.destroyed = true;
-        if (activeRequest) {
-            streamDestroy(...args);
-        }
-        else {
-            destroyArgs = args;
-        }
-    };
-    stream.text = () => new Promise((resolve, reject) => {
-        let body = '';
-        stream.setEncoding('utf8');
-        stream.on('data', chunk => body += chunk);
-        stream.on('end', () => resolve(body));
-        stream.on('error', reject);
-    });
-    process.nextTick(doDownload);
-    return stream;
-}
-module.exports = Miniget;
-
-}).call(this)}).call(this,require('_process'))
-},{"_process":16,"http":38,"https":13,"stream":23}],74:[function(require,module,exports){
+},{"../package.json":72,"_process":15,"miniget":14}],72:[function(require,module,exports){
 module.exports={
   "name": "ytdl-core",
   "description": "YouTube video downloader in pure javascript.",
@@ -14083,7 +13799,7 @@ module.exports={
   "license": "MIT"
 }
 
-},{}],75:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 class KeyboardLooper {
     constructor(sampler, looper) {
         this.loops = {}
@@ -14218,7 +13934,7 @@ class KeyboardLooper {
 
 module.exports = KeyboardLooper
 
-},{}],76:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 const {rand, irand, CallableInstance} = require('./utils')
 
 class Looper extends CallableInstance {
@@ -14302,7 +14018,7 @@ class Looper extends CallableInstance {
 }
 
 module.exports = Looper
-},{"./utils":79}],77:[function(require,module,exports){
+},{"./utils":77}],75:[function(require,module,exports){
 const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
 const YoutubePlayer = require('./youtubeFunctions')
@@ -14330,7 +14046,7 @@ for(const name of forwardLooper) { forwardFunc(window.l, name) }
 
 
 
-},{"./keyboard":75,"./looper":76,"./preloader":78,"./utils":79,"./youtubeFunctions":80,"stream-to-blob":57,"ytdl-core":67}],78:[function(require,module,exports){
+},{"./keyboard":73,"./looper":74,"./preloader":76,"./utils":77,"./youtubeFunctions":78,"stream-to-blob":56,"ytdl-core":66}],76:[function(require,module,exports){
 const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
 const {CallableInstance} = require('./utils')
@@ -14338,10 +14054,31 @@ const {CallableInstance} = require('./utils')
 class VideoPreloader extends CallableInstance{
     constructor() {
         super('call');
+        this.initDb();
         //this.openDb();
     }
 
-    openDb() {
+    get hasStorage() { return !!this.db }
+
+    initDb() {
+        this.db = {};
+    }
+
+    clear() { delete this.db; this.initDb() }
+
+    hasStored(id) { return this.hasStorage && !!this.db[id] }
+
+    getStoredBlob(id) {
+        return this.hasStored(id) ? this.db[id] : false
+    }
+
+    storeBlob(id, blob) {
+        if (!this.hasStorage) return false
+        this.db[id] = blob;
+        return true
+    }
+
+    /*openDb() {
         const request = window.indexedDB.open("ytSamplerTools", 1)
         request.onversionchange = () => {
             this.db.createObjectStore('ytSamplerTools')
@@ -14355,39 +14092,41 @@ class VideoPreloader extends CallableInstance{
             };
         }
     }
+    clear() { if (this.hasStorage) this.db.deleteObjectStore('ytSamplerTools') }
+    isStored (id) {
+        if (!this.hasStorage) return false
+        return !!window.localStorage.ytSamplerToolsStorage[id]
+    }
+    getStoredBlob(id) {
+        if (!this.hasStorage()) return false
+        this.dbTransaction.objectStore("ytSamplerTools").get(id);
+    }
+    storeBlob(id, blob) {
+        if (!this.hasStorage()) return false
+        this.dbTransaction.objectStore("ytSamplerTools").put(blob, id);
+    }
+    */
 
     getId (url) {
         return new URLSearchParams(new URL(url).search).get('v');
     }
 
-    clear() { if (this.hasStorage) this.db.deleteObjectStore('ytSamplerTools') }
-
-    hasStorage() { return !!this.db }
-
-    isStored (id) {
-        if (!this.hasStorage()) return false
-        return !!window.localStorage.ytSamplerToolsStorage[id]
-    }
-
-    getStoredBlob(id) {
-        if (!this.hasStorage()) return false
-        this.dbTransaction.objectStore("ytSamplerTools").get(id);
-    }
-
-    storeBlob(id, blob) {
-        if (!this.hasStorage()) return false
-        this.dbTransaction.objectStore("ytSamplerTools").put(blob, id);
-    }
-
-    preload(url, store = false) {
+    preload(url, store = true, maxRetries = 4) {
         url = url || window.location.href;
         console.log('[Preloading]', url);
         const id = this.getId(url);
-        if (this.isStored(id)) {
+        if (this.hasStored(id)) {
             console.log('[Preloading] got it from storage')
             this.replaceVideo(this.getStoredBlob(id))
         } else {
             const stream = this.getBlob(url);
+            stream.on('error', err => {
+                console.error(`[Preloading] ${err}`)
+                if (maxRetries > 0) {
+                    console.warn(`[Preloading] retrying in 1s (attempts left: ${maxRetries})`)
+                    setTimeout(() => this.preload(url, store, maxRetries - 1), 1000)
+                }
+            });
             s2b(stream).then(blob => {
                 console.log('[Preloading] got blob:', blob);
                 this.replaceVideo(blob)
@@ -14430,7 +14169,7 @@ class VideoPreloader extends CallableInstance{
 
 module.exports = VideoPreloader;
 
-},{"./utils":79,"stream-to-blob":57,"ytdl-core":67}],79:[function(require,module,exports){
+},{"./utils":77,"stream-to-blob":56,"ytdl-core":66}],77:[function(require,module,exports){
 const rand = (lo = 0, hi = 1) => Math.random() * (hi -lo) + lo
 const irand = (lo = 0, hi = 1) => Math.round(Math.random() * (hi -lo) + lo)
 const coin = (prob = 0.5) => Math.random() < prob
@@ -14448,7 +14187,7 @@ function CallableInstance(property) {
 CallableInstance.prototype = Object.create(Function.prototype);
 
 module.exports = {rand, irand, coin, choose, CallableInstance}
-},{}],80:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 const {rand, irand} = require('./utils')
 
 class YoutubePlayer {
@@ -14512,4 +14251,4 @@ class YoutubePlayer {
 
 module.exports = YoutubePlayer
 
-},{"./utils":79}]},{},[77]);
+},{"./utils":77}]},{},[75]);

@@ -5,10 +5,31 @@ const {CallableInstance} = require('./utils')
 class VideoPreloader extends CallableInstance{
     constructor() {
         super('call');
+        this.initDb();
         //this.openDb();
     }
 
-    openDb() {
+    get hasStorage() { return !!this.db }
+
+    initDb() {
+        this.db = {};
+    }
+
+    clear() { delete this.db; this.initDb() }
+
+    hasStored(id) { return this.hasStorage && !!this.db[id] }
+
+    getStoredBlob(id) {
+        return this.hasStored(id) ? this.db[id] : false
+    }
+
+    storeBlob(id, blob) {
+        if (!this.hasStorage) return false
+        this.db[id] = blob;
+        return true
+    }
+
+    /*openDb() {
         const request = window.indexedDB.open("ytSamplerTools", 1)
         request.onversionchange = () => {
             this.db.createObjectStore('ytSamplerTools')
@@ -22,39 +43,41 @@ class VideoPreloader extends CallableInstance{
             };
         }
     }
+    clear() { if (this.hasStorage) this.db.deleteObjectStore('ytSamplerTools') }
+    isStored (id) {
+        if (!this.hasStorage) return false
+        return !!window.localStorage.ytSamplerToolsStorage[id]
+    }
+    getStoredBlob(id) {
+        if (!this.hasStorage()) return false
+        this.dbTransaction.objectStore("ytSamplerTools").get(id);
+    }
+    storeBlob(id, blob) {
+        if (!this.hasStorage()) return false
+        this.dbTransaction.objectStore("ytSamplerTools").put(blob, id);
+    }
+    */
 
     getId (url) {
         return new URLSearchParams(new URL(url).search).get('v');
     }
 
-    clear() { if (this.hasStorage) this.db.deleteObjectStore('ytSamplerTools') }
-
-    hasStorage() { return !!this.db }
-
-    isStored (id) {
-        if (!this.hasStorage()) return false
-        return !!window.localStorage.ytSamplerToolsStorage[id]
-    }
-
-    getStoredBlob(id) {
-        if (!this.hasStorage()) return false
-        this.dbTransaction.objectStore("ytSamplerTools").get(id);
-    }
-
-    storeBlob(id, blob) {
-        if (!this.hasStorage()) return false
-        this.dbTransaction.objectStore("ytSamplerTools").put(blob, id);
-    }
-
-    preload(url, store = false) {
+    preload(url, store = true, maxRetries = 4) {
         url = url || window.location.href;
         console.log('[Preloading]', url);
         const id = this.getId(url);
-        if (this.isStored(id)) {
+        if (this.hasStored(id)) {
             console.log('[Preloading] got it from storage')
             this.replaceVideo(this.getStoredBlob(id))
         } else {
             const stream = this.getBlob(url);
+            stream.on('error', err => {
+                console.error(`[Preloading] ${err}`)
+                if (maxRetries > 0) {
+                    console.warn(`[Preloading] retrying in 1s (attempts left: ${maxRetries})`)
+                    setTimeout(() => this.preload(url, store, maxRetries - 1), 1000)
+                }
+            });
             s2b(stream).then(blob => {
                 console.log('[Preloading] got blob:', blob);
                 this.replaceVideo(blob)
