@@ -71,6 +71,10 @@ stut2(1, 3);
 
 // stop stuttering
 stut(0);
+
+// seek and stutter
+l("a", ()=>{seek(rand(10,100)); stut2(1.2)}, ()=>rand(5,15));
+l.stop("a");
 ```
 
 ### Development
