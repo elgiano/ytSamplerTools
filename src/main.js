@@ -4,7 +4,7 @@ const YoutubePlayer = require('./youtubeFunctions')
 const Looper = require('./looper')
 const KeyboardLooper = require('./keyboard')
 const VideoPreloader = require('./preloader')
-const {rand, irand, coin, choose} = require('./utils')
+const {rand, irand, coin, choose, seq} = require('./utils')
 
 window.ytdl = ytdl
 window.s2b = s2b
@@ -13,7 +13,7 @@ window.l = new Looper(window.y)
 window.k = new KeyboardLooper(window.y, window.l);
 window.p = new VideoPreloader();
 
-Object.assign(window, {rand, irand, coin, choose})
+Object.assign(window, {rand, irand, coin, choose, seq})
 
 const forwardFunc = (obj, name) => {
     window[name] = (...args) => obj[name](...args)
