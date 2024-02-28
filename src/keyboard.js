@@ -43,6 +43,7 @@ class KeyboardLooper {
         }
 
         this.keymap['z'] = (e) => this.sampler.togglePitchShift()
+        this.keymap['b'] = (e) => this.sampler.toggleDisplay()
     }
 
     has(name) { return !!this.loops[name] }

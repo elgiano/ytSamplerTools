@@ -51,7 +51,11 @@ class YoutubePlayer {
         } else {
             console.warn("[pitchShift] not supported by this browser")
         }
-        
+    }
+
+    toggleDisplay() {
+        const style = document.body.style
+        style.visibility = (style.visibility == 'hidden') ? 'visible' : 'hidden'
     }
 
     get vol() { return this.v.volume }
