@@ -14099,10 +14099,15 @@ class Looper extends CallableInstance {
         this.run(name);
     };
     stop(name) { 
+        if(name == undefined) return this.stopAll()
         if(!this.has(name)) return; 
         clearInterval(this.loops[name].id); 
         delete this.loops[name]
     };
+    stopAll() {
+        for (const name in this.loops)
+            this.stop(name)
+    }
     isPlaying(name) { return (!this.has(name)) ? (false) : (this.loops[name].playing) }
     pause(name) { if(this.has(name)) { this.loops[name].playing = false } };
     play(name) { if(this.has(name)) { this.loops[name].playing = true; this.run(name) } };
@@ -14166,6 +14171,7 @@ class Looper extends CallableInstance {
 }
 
 module.exports = Looper
+
 },{"./utils":78}],76:[function(require,module,exports){
 const ytdl = require('ytdl-core')
 const s2b = require('stream-to-blob')
@@ -14173,7 +14179,7 @@ const YoutubePlayer = require('./youtubeFunctions')
 const Looper = require('./looper')
 const KeyboardLooper = require('./keyboard')
 const VideoPreloader = require('./preloader')
-const {rand, irand, coin, choose} = require('./utils')
+const {rand, irand, coin, choose, seq} = require('./utils')
 
 window.ytdl = ytdl
 window.s2b = s2b
@@ -14182,7 +14188,7 @@ window.l = new Looper(window.y)
 window.k = new KeyboardLooper(window.y, window.l);
 window.p = new VideoPreloader();
 
-Object.assign(window, {rand, irand, coin, choose})
+Object.assign(window, {rand, irand, coin, choose, seq})
 
 const forwardFunc = (obj, name) => {
     window[name] = (...args) => obj[name](...args)
@@ -14323,6 +14329,15 @@ const irand = (lo = 0, hi = 1) => Math.round(Math.random() * (hi -lo) + lo)
 const coin = (prob = 0.5) => Math.random() < prob
 const choose = (list) => list[irand(0, list.length - 1)]
 
+const seq = (list) => {
+  return {
+    pos: -1,
+    get next() {
+      this.pos = (this.pos + 1) % list.length
+      return list[this.pos]
+    }}
+}
+
 function CallableInstance(property) {
   var func = this.constructor.prototype[property];
   var apply = function() { return func.apply(apply, arguments); }
@@ -14334,7 +14349,8 @@ function CallableInstance(property) {
 }
 CallableInstance.prototype = Object.create(Function.prototype);
 
-module.exports = {rand, irand, coin, choose, CallableInstance}
+module.exports = {rand, irand, coin, choose, CallableInstance, seq}
+
 },{}],79:[function(require,module,exports){
 const {rand, irand} = require('./utils')
 

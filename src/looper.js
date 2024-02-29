@@ -14,10 +14,15 @@ class Looper extends CallableInstance {
         this.run(name);
     };
     stop(name) { 
+        if(name == undefined) return this.stopAll()
         if(!this.has(name)) return; 
         clearInterval(this.loops[name].id); 
         delete this.loops[name]
     };
+    stopAll() {
+        for (const name in this.loops)
+            this.stop(name)
+    }
     isPlaying(name) { return (!this.has(name)) ? (false) : (this.loops[name].playing) }
     pause(name) { if(this.has(name)) { this.loops[name].playing = false } };
     play(name) { if(this.has(name)) { this.loops[name].playing = true; this.run(name) } };

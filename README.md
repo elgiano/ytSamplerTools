@@ -75,6 +75,23 @@ stut(0);
 // seek and stutter
 l("a", ()=>{seek(rand(10,100)); stut2(1.2)}, ()=>rand(5,15));
 l.stop("a");
+
+// stop all loops and stutters
+l.stop()
+```
+
+#### Sequences
+```javascript
+// sequence of seek positions
+s = seq([10, 20, 30])
+l(0, ()=>{seek(s.next)}, ()=>rand(1,3))
+
+// sequence of speeds
+p = seq([1, 1.25, 1.5, 15/8])
+l(1, ()=>{sp(p.next)}, ()=>rand(1,3))
+
+// seek to position randomly chosen from a list
+l(2, ()=>{seek(choose([1,2,3,4]))}, ()=>1)
 ```
 
 ### Development
