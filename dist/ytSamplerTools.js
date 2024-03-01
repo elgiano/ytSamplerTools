@@ -14332,10 +14332,16 @@ const choose = (list) => list[irand(0, list.length - 1)]
 const seq = (list) => {
   return {
     pos: -1,
+    get list() { return list },
     get next() {
       this.pos = (this.pos + 1) % list.length
       return list[this.pos]
-    }}
+    },
+    get rand() {
+      this.pos = irand(0, list.length - 1)
+      return list[this.pos]
+    }
+  }
 }
 
 function CallableInstance(property) {
