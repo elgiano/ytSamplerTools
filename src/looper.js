@@ -5,48 +5,89 @@ class Looper extends CallableInstance {
         super('call');
         this.sampler = sampler;
         this.loops = {}
+        this.isPaused = false
     }
 
+    call(...args) { this.add(...args) };
+
     has(loopName) { return !!this.loops[loopName] }
+    /**
+     *  registers a new loop
+     *  @param name {any} loop identifier (e.g. 'a' or 1)
+     *  @param fn {()=>void} loop function
+     *  @param fnDelta {()=>number} function returning loop delta time
+     * */
     add(name, fn, fnDelta = 1000, playing = true) { 
         this.stop(name); 
-        this.loops[name] = {fn, fnDelta, playing};
-        this.run(name);
+        this.loops[name] = {fn, fnDelta, playing, id: null};
+        if (playing)
+            this.run(name);
     };
+    /**
+    * stop loop
+    * param name {any?} if undefined, stop all
+    * */
     stop(name) { 
         if(name == undefined) return this.stopAll()
         if(!this.has(name)) return; 
         clearInterval(this.loops[name].id); 
-        delete this.loops[name]
+        delete this.loops[name].id
     };
     stopAll() {
         for (const name in this.loops)
             this.stop(name)
     }
-    isPlaying(name) { return (!this.has(name)) ? (false) : (this.loops[name].playing) }
-    pause(name) { if(this.has(name)) { this.loops[name].playing = false } };
+    isPlaying(name) { return (!this.has(name)) ? (false) : (this.loops[name].id != null) }
     play(name) { if(this.has(name)) { this.loops[name].playing = true; this.run(name) } };
-    toggle(name) { if(this.has(name)) { this.isPlaying(name) ? this.pause(name) : this.play(name) } };
+    toggle(name) { if(this.has(name)) { this.isPlaying(name) ? this.stop(name) : this.play(name) } };
+
+    /**
+    * pause the looper, preventing further loops executions
+    * running loops will be resumed when .resume() is called
+    * */
+    pause(pause=true) {
+        this.isPaused = pause; 
+        if(!pause) {
+            for (const name in this.loops)
+            if (this.loops[name].playing)
+            this.run(name)
+        }
+    };
+    resume() { this.pause(false) }
 
     run(name) {
-        if(!this.isPlaying(name)) return
-        this.loops[name].fn();
-        let delta = this.loops[name].fnDelta || 0.1;
-        if (typeof delta === 'function') delta = this.loops[name].fnDelta()
+        if(this.isPaused) return
+        let loop = this.loops[name]
+        try {
+            let now = new Date();
+            loop.fn();
+            if (loop.lastExecTime) {
+                let delta = (now - loop.lastExecTime) / 1000
+                console.log(`[ytst] l(${name}) prev: ${delta.toFixed(2)}`);
+            }
+            loop.lastExecTime = now
+        } catch (err) {
+            console.error(`[ytst] l(${name}) ERROR: stopping`);
+            throw err
+        }
+
+        let delta = loop.fnDelta || 0.1;
+        if (typeof delta === 'function') delta = loop.fnDelta()
         if (typeof delta != 'number') {
-            console.log(`[${name}] delta is not a number: stopping`);
-            this.pause(name)
+            console.error(`[ytst] l(${name}) delta is not a number: stopping`);
+            this.stop(name)
+            return
         }
         delta = Math.max(0.1, delta)
-        console.log(`[${name}] next: ${delta}`);
-        clearInterval(this.loops[name].id)
-        this.loops[name].id = setTimeout(()=>this.run(name), delta * 1000)
+        console.log(`[ytst] l(${name}) next: ${delta.toFixed(2)}`);
+
+        clearInterval(loop.id)
+        loop.id = setTimeout(()=>this.run(name), delta * 1000)
     }
 
-    call(...args) { this.add(...args) };
 
     stut(delta) { 
-        if(delta <= 0) this.pause('stut')
+        if(delta <= 0) this.stop('stut')
         else { 
             this.add('stut', () => this.sampler.seekDelta(-delta), () => delta)
         }
@@ -54,7 +95,7 @@ class Looper extends CallableInstance {
 
     stutCur(delta) { 
         const pos = this.sampler.curPos;
-        if(delta <= 0) this.pause('stut')
+        if(delta <= 0) this.stop('stut')
         else { 
             this.add('stut', () => this.sampler.seek(pos), () => delta)
         }
@@ -62,7 +103,7 @@ class Looper extends CallableInstance {
 
     stutCurRand(lo = 0.1, hi = 0.2) { 
         const pos = this.sampler.curPos;
-        if(lo <= 0) this.pause('stut')
+        if(lo <= 0) this.stop('stut')
         else { 
             this.add('stut', () => this.sampler.seek(pos), () => rand(lo, hi))
         }
